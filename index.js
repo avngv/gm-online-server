@@ -1,23 +1,17 @@
-import http from "http";
-import { WebSocketServer } from "ws";
+const http = require("http");
+const WebSocket = require("ws");
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
+// Create HTTP server
 const server = http.createServer((req, res) =>
 {
     res.writeHead(200);
-    res.end("OK");
+    res.end("WebSocket server running");
 });
 
-const wss = new WebSocketServer({ noServer: true });
-
-server.on("upgrade", (request, socket, head) =>
-{
-    wss.handleUpgrade(request, socket, head, (ws) =>
-    {
-        wss.emit("connection", ws, request);
-    });
-});
+// Attach websocket
+const wss = new WebSocket.Server({ server });
 
 wss.on("connection", (ws) =>
 {
@@ -27,10 +21,17 @@ wss.on("connection", (ws) =>
 
     ws.on("message", (msg) =>
     {
-        ws.send(msg.toString());
+        console.log("Received:", msg.toString());
+        ws.send("echo: " + msg);
+    });
+
+    ws.on("close", () =>
+    {
+        console.log("Client disconnected");
     });
 });
 
+// Start server
 server.listen(PORT, () =>
 {
     console.log("Server running on port", PORT);
