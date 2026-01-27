@@ -5,11 +5,19 @@ const PORT = process.env.PORT || 3000;
 
 const server = http.createServer((req, res) =>
 {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Server alive");
+    res.writeHead(200);
+    res.end("OK");
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (request, socket, head) =>
+{
+    wss.handleUpgrade(request, socket, head, (ws) =>
+    {
+        wss.emit("connection", ws, request);
+    });
+});
 
 wss.on("connection", (ws) =>
 {
