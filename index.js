@@ -1,40 +1,32 @@
+import http from "http";
 import { WebSocketServer } from "ws";
 
 const PORT = process.env.PORT || 3000;
 
-const wss = new WebSocketServer({ port: PORT });
+// create http server
+const server = http.createServer((req, res) =>
+{
+    res.writeHead(200);
+    res.end("OK");
+});
 
-console.log("Server running on port", PORT);
+// attach websocket to http server
+const wss = new WebSocketServer({ server });
 
-// simple 1v1 rooms
-let players = [];
-
-wss.on("connection", (ws) =>
+wss.on("connection", (ws, req) =>
 {
     console.log("Player connected");
 
-    players.push(ws);
+    ws.send("hello from railway");
 
-    ws.send(JSON.stringify({
-        type: "connected",
-        id: players.length
-    }));
-
-    ws.on("message", (data) =>
+    ws.on("message", (msg) =>
     {
-        let msg = JSON.parse(data);
-
-        // broadcast to opponent
-        players.forEach(p =>
-        {
-            if (p !== ws && p.readyState === 1)
-                p.send(JSON.stringify(msg));
-        });
+        ws.send(msg.toString());
     });
+});
 
-    ws.on("close", () =>
-    {
-        console.log("Player disconnected");
-        players = players.filter(p => p !== ws);
-    });
+// listen
+server.listen(PORT, () =>
+{
+    console.log("Server running on port", PORT);
 });
