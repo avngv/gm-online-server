@@ -3,19 +3,17 @@ import { WebSocketServer } from "ws";
 
 const PORT = process.env.PORT || 3000;
 
-// create http server
 const server = http.createServer((req, res) =>
 {
-    res.writeHead(200);
-    res.end("OK");
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Server alive");
 });
 
-// attach websocket to http server
 const wss = new WebSocketServer({ server });
 
-wss.on("connection", (ws, req) =>
+wss.on("connection", (ws) =>
 {
-    console.log("Player connected");
+    console.log("Client connected");
 
     ws.send("hello from railway");
 
@@ -25,7 +23,6 @@ wss.on("connection", (ws, req) =>
     });
 });
 
-// listen
 server.listen(PORT, () =>
 {
     console.log("Server running on port", PORT);
