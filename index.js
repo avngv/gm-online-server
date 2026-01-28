@@ -9,11 +9,9 @@ const RECONNECT_TIMEOUT = 30000; // 30 seconds
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
-// Track connected players
 let players = []; // { ws, playerId }
 let disconnectedPlayers = {}; // { playerId: timeout }
 
-// Match state
 let match = {
     diceRolls: [],
     guesses: [[], []],
@@ -21,7 +19,6 @@ let match = {
     playerIds: []
 };
 
-// JSON safe parse
 function safeJSON(data) {
     try {
         if (typeof data === "string") return JSON.parse(data);
@@ -31,7 +28,6 @@ function safeJSON(data) {
     }
 }
 
-// Broadcast to all connected players
 function broadcast(obj) {
     const msg = JSON.stringify(obj);
     players.forEach(p => {
@@ -39,7 +35,6 @@ function broadcast(obj) {
     });
 }
 
-// Shuffle dice [1-6]
 function rollDice() {
     const arr = [1, 2, 3, 4, 5, 6];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -49,7 +44,6 @@ function rollDice() {
     return arr;
 }
 
-// Start match
 function startMatch() {
     match.diceRolls = rollDice();
     match.guesses = [[], []];
@@ -57,24 +51,19 @@ function startMatch() {
     match.playerIds = players.map(p => p.playerId);
 
     console.log("Match dice rolls:", match.diceRolls);
-
     broadcast({ type: "match_start", turns: TURNS });
-
     nextTurn();
 }
 
-// Next turn
 function nextTurn() {
     if (match.currentTurn >= TURNS) {
         endMatch();
         return;
     }
-
     broadcast({ type: "turn_start", turn: match.currentTurn + 1 });
     match.currentTurn++;
 }
 
-// End match
 function endMatch() {
     const results = [0, 0];
     for (let i = 0; i < TURNS; i++) {
@@ -82,7 +71,6 @@ function endMatch() {
             if (match.guesses[p][i] === match.diceRolls[i]) results[p]++;
         }
     }
-
     let winner = null;
     if (results[0] > results[1]) winner = 0;
     else if (results[1] > results[0]) winner = 1;
@@ -95,19 +83,16 @@ function endMatch() {
         winner
     });
 
-    // Reset everything
+    // reset
     match = { diceRolls: [], guesses: [[], []], currentTurn: 0, playerIds: [] };
     players = [];
 }
 
-// Handle disconnect
 function handleDisconnect(player) {
     console.log("Player disconnected:", player.playerId);
-
     players = players.filter(p => p !== player);
     broadcast({ type: "opponent_left" });
 
-    // Start 30-second timeout for reconnection
     disconnectedPlayers[player.playerId] = setTimeout(() => {
         console.log("Match ended due to timeout for player:", player.playerId);
         if (players.length < 2) endMatch();
@@ -115,7 +100,6 @@ function handleDisconnect(player) {
     }, RECONNECT_TIMEOUT);
 }
 
-// Handle reconnect
 function handleReconnect(ws, playerId) {
     console.log("Player reconnected:", playerId);
 
@@ -124,7 +108,9 @@ function handleReconnect(ws, playerId) {
         delete disconnectedPlayers[playerId];
     }
 
+    ws.playerId = playerId;
     players.push({ ws, playerId });
+
     ws.send(JSON.stringify({ type: "reconnect", matchState: match }));
     broadcast({ type: "player_reconnected", playerId });
 }
@@ -139,7 +125,6 @@ wss.on("connection", (ws) => {
         // Join / reconnect
         if (msg.type === "join") {
             if (!msg.playerId) {
-                // Assign new playerId
                 const newId = randomUUID();
                 ws.playerId = newId;
                 ws.send(JSON.stringify({ type: "assign_id", playerId: newId }));
@@ -160,6 +145,7 @@ wss.on("connection", (ws) => {
             }
 
             players.push({ ws, playerId: msg.playerId });
+            match.playerIds.push(msg.playerId);
             ws.send(JSON.stringify({ type: "wait", count: players.length }));
 
             if (players.length === 2) startMatch();
