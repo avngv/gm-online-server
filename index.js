@@ -4,13 +4,13 @@ const { randomUUID } = require("crypto");
 
 const PORT = process.env.PORT || 8080;
 const TURNS = 6;
-const RECONNECT_TIMEOUT = 30000; // 30 seconds
+const RECONNECT_TIMEOUT = 30000;
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
-let players = []; // Array of { ws, playerId }
-let disconnectedPlayers = {}; // Dictionary of { playerId: timeout }
+let players = []; 
+let disconnectedPlayers = {}; 
 
 let match = {
     diceRolls: [],
@@ -19,37 +19,25 @@ let match = {
     playerIds: []
 };
 
-/**
- * Sends a JSON object to a GameMaker client.
- * Appends the null terminator (\0) required by GM's buffer_read(..., buffer_string).
- */
 function sendToGM(ws, obj) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
         const msg = JSON.stringify(obj) + "\0"; 
         ws.send(msg);
-        console.log(`Sent to ${ws.playerId || "unknown"}: ${msg}`);
     }
 }
 
-/**
- * Attempts to parse incoming data from GameMaker.
- */
 function safeJSON(data) {
     try {
-        const str = data.toString().replace(/\0/g, ''); // Remove any null bytes from incoming
+        const str = data.toString().replace(/\0/g, '');
         return JSON.parse(str);
-    } catch (e) {
-        console.error("Parse Error. Received raw data:", data.toString());
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 function broadcast(obj) {
-    players.forEach(p => {
-        sendToGM(p.ws, obj);
-    });
+    players.forEach(p => sendToGM(p.ws, obj));
 }
 
+// --- LOGIC TRẬN ĐẤU GIỮ NGUYÊN ---
 function rollDice() {
     const arr = [1, 2, 3, 4, 5, 6];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -64,8 +52,7 @@ function startMatch() {
     match.guesses = [[], []];
     match.currentTurn = 0;
     match.playerIds = players.map(p => p.playerId);
-
-    console.log("Match started. Dice rolls:", match.diceRolls);
+    console.log("Match started:", match.diceRolls);
     broadcast({ type: "match_start", turns: TURNS });
     nextTurn();
 }
@@ -98,81 +85,74 @@ function endMatch() {
         winner
     });
 
-    // Clean up
     match = { diceRolls: [], guesses: [[], []], currentTurn: 0, playerIds: [] };
     players = [];
 }
 
+// --- LOGIC KẾT NỐI (ĐÃ SỬA) ---
+
 function handleDisconnect(player) {
     console.log("Player disconnected:", player.playerId);
-    players = players.filter(p => p !== player);
+    players = players.filter(p => p.playerId !== player.playerId);
     broadcast({ type: "opponent_left" });
 
+    // Lưu timeout để xóa hẳn nếu không quay lại
     disconnectedPlayers[player.playerId] = setTimeout(() => {
-        console.log("Cleanup timeout for player:", player.playerId);
-        if (players.length < 2 && match.playerIds.length > 0) {
-            endMatch();
-        }
+        console.log("Xóa hẳn player do quá thời gian:", player.playerId);
         delete disconnectedPlayers[player.playerId];
+        // Nếu trận đấu đang diễn ra mà chỉ còn 1 người, có thể kết thúc sớm ở đây
     }, RECONNECT_TIMEOUT);
 }
 
-function handleReconnect(ws, playerId) {
-    console.log("Player reconnected:", playerId);
-
-    if (disconnectedPlayers[playerId]) {
-        clearTimeout(disconnectedPlayers[playerId]);
-        delete disconnectedPlayers[playerId];
-    }
-
-    ws.playerId = playerId;
-    players.push({ ws, playerId });
-
-    sendToGM(ws, { type: "reconnect", matchState: match });
-    broadcast({ type: "player_reconnected", playerId });
-}
-
 wss.on("connection", (ws) => {
-    console.log("New WebSocket connection established");
+    console.log("New connection");
 
     ws.on("message", (data) => {
-        console.log("Raw incoming:", data.toString());
         const msg = safeJSON(data);
         if (!msg) return;
 
-        // JOIN / RECONNECT LOGIC
         if (msg.type === "join") {
-            // New Player
-            if (!msg.playerId) {
-                const newId = randomUUID();
-                ws.playerId = newId;
-                console.log("Assigning new ID:", newId);
-                sendToGM(ws, { type: "assign_id", playerId: newId });
+            const existingId = msg.playerId;
+
+            // 1. TRƯỜNG HỢP RECONNECT (Quan trọng nhất)
+            if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
+                console.log("Player reconnecting:", existingId);
                 
-                // Add to lobby
-                if (players.length < 2) {
-                    players.push({ ws, playerId: newId });
-                    match.playerIds.push(newId);
-                    sendToGM(ws, { type: "wait", count: players.length });
-                    if (players.length === 2) startMatch();
-                } else {
-                    sendToGM(ws, { type: "full" });
-                    ws.close();
+                // Hủy đếm ngược xóa
+                if (disconnectedPlayers[existingId]) {
+                    clearTimeout(disconnectedPlayers[existingId]);
+                    delete disconnectedPlayers[existingId];
                 }
+
+                // Cập nhật socket mới
+                ws.playerId = existingId;
+                players.push({ ws, playerId: existingId });
+
+                // Gửi trạng thái hiện tại cho người vừa quay lại
+                sendToGM(ws, { type: "reconnect", matchState: match });
+                broadcast({ type: "player_reconnected", playerId: existingId });
                 return;
             }
 
-            // Reconnecting Player
-            ws.playerId = msg.playerId;
-            if (disconnectedPlayers[msg.playerId]) {
-                handleReconnect(ws, msg.playerId);
-            } else if (players.length < 2) {
-                players.push({ ws, playerId: msg.playerId });
-                match.playerIds.push(msg.playerId);
+            // 2. TRƯỜNG HỢP MỚI HOÀN TOÀN
+            if (!existingId) {
+                if (players.length >= 2) {
+                    sendToGM(ws, { type: "full" });
+                    ws.close();
+                    return;
+                }
+                const newId = randomUUID();
+                ws.playerId = newId;
+                sendToGM(ws, { type: "assign_id", playerId: newId });
+                
+                players.push({ ws, playerId: newId });
                 sendToGM(ws, { type: "wait", count: players.length });
+
                 if (players.length === 2) startMatch();
-            } else {
-                sendToGM(ws, { type: "full" });
+            } 
+            else {
+                // Có ID nhưng không nằm trong danh sách trận hiện tại (ID cũ từ trận trước)
+                sendToGM(ws, { type: "full" }); 
                 ws.close();
             }
         }
@@ -183,35 +163,23 @@ wss.on("connection", (ws) => {
             if (playerIndex === -1) return;
 
             match.guesses[playerIndex][match.currentTurn - 1] = msg.value;
-
             const turnGuesses = match.guesses.map(g => g[match.currentTurn - 1]);
-            // If both players have guessed for this turn
+            
             if (turnGuesses.length === 2 && turnGuesses.every(g => g !== undefined)) {
-                const turnIndex = match.currentTurn - 1;
                 broadcast({
                     type: "turn_result",
-                    turn: turnIndex + 1,
-                    dice: match.diceRolls[turnIndex],
+                    turn: match.currentTurn,
+                    dice: match.diceRolls[match.currentTurn - 1],
                     guesses: turnGuesses
                 });
-
                 setTimeout(nextTurn, 1500);
             }
         }
     });
 
     ws.on("close", () => {
-        if (ws.playerId) {
-            handleDisconnect({ ws, playerId: ws.playerId });
-        }
-    });
-
-    ws.on("error", (err) => {
-        console.error("Socket Error:", err.message);
+        if (ws.playerId) handleDisconnect({ ws, playerId: ws.playerId });
     });
 });
 
-// Important: Listen on 0.0.0.0 for Railway
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server listening on port ${PORT}`);
-});
+server.listen(PORT, "0.0.0.0", () => console.log(`Server on ${PORT}`));
