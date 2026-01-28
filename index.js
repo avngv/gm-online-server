@@ -15,10 +15,15 @@ let disconnectedPlayers = {};
 let match = {
     diceRolls: [],
     guesses: [[], []],
+    scores: [0, 0],
     currentTurn: 0,
-    playerIds: []
+    playerIds: [],
+    status: "waiting" // waiting, playing, results, finished
 };
 
+/**
+ * Sends a JSON object to a GameMaker client with null terminator.
+ */
 function sendToGM(ws, obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         const msg = JSON.stringify(obj) + "\0"; 
@@ -26,6 +31,9 @@ function sendToGM(ws, obj) {
     }
 }
 
+/**
+ * Safely parses incoming data from GameMaker buffers.
+ */
 function safeJSON(data) {
     try {
         const str = data.toString().replace(/\0/g, '');
@@ -37,7 +45,6 @@ function broadcast(obj) {
     players.forEach(p => sendToGM(p.ws, obj));
 }
 
-// --- LOGIC TRẬN ĐẤU GIỮ NGUYÊN ---
 function rollDice() {
     const arr = [1, 2, 3, 4, 5, 6];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -50,9 +57,12 @@ function rollDice() {
 function startMatch() {
     match.diceRolls = rollDice();
     match.guesses = [[], []];
+    match.scores = [0, 0];
     match.currentTurn = 0;
     match.playerIds = players.map(p => p.playerId);
-    console.log("Match started:", match.diceRolls);
+    match.status = "playing";
+
+    console.log("Match started. Dice:", match.diceRolls);
     broadcast({ type: "match_start", turns: TURNS });
     nextTurn();
 }
@@ -62,117 +72,119 @@ function nextTurn() {
         endMatch();
         return;
     }
-    broadcast({ type: "turn_start", turn: match.currentTurn + 1 });
     match.currentTurn++;
+    match.status = "playing"; // Allow guessing
+    broadcast({ 
+        type: "turn_start", 
+        turn: match.currentTurn,
+        scores: match.scores 
+    });
 }
 
 function endMatch() {
-    const results = [0, 0];
-    for (let i = 0; i < TURNS; i++) {
-        for (let p = 0; p < 2; p++) {
-            if (match.guesses[p][i] === match.diceRolls[i]) results[p]++;
-        }
-    }
-    let winner = null;
-    if (results[0] > results[1]) winner = 0;
-    else if (results[1] > results[0]) winner = 1;
+    match.status = "finished";
+    let winnerId = -1; // Draw
+    if (match.scores[0] > match.scores[1]) winnerId = 0;
+    else if (match.scores[1] > match.scores[0]) winnerId = 1;
 
     broadcast({
         type: "match_end",
         diceRolls: match.diceRolls,
-        guesses: match.guesses,
-        results,
-        winner
+        finalScores: match.scores,
+        winner: winnerId
     });
 
-    match = { diceRolls: [], guesses: [[], []], currentTurn: 0, playerIds: [] };
-    players = [];
+    console.log("Match ended. Restarting in 10s...");
+    
+    // Auto-restart logic
+    setTimeout(() => {
+        if (players.length === 2) {
+            startMatch();
+        } else {
+            match.status = "waiting";
+            broadcast({ type: "wait", count: players.length });
+        }
+    }, 10000);
 }
-
-// --- LOGIC KẾT NỐI (ĐÃ SỬA) ---
 
 function handleDisconnect(player) {
     console.log("Player disconnected:", player.playerId);
     players = players.filter(p => p.playerId !== player.playerId);
     broadcast({ type: "opponent_left" });
 
-    // Lưu timeout để xóa hẳn nếu không quay lại
     disconnectedPlayers[player.playerId] = setTimeout(() => {
-        console.log("Xóa hẳn player do quá thời gian:", player.playerId);
+        console.log("Cleaning up player record:", player.playerId);
         delete disconnectedPlayers[player.playerId];
-        // Nếu trận đấu đang diễn ra mà chỉ còn 1 người, có thể kết thúc sớm ở đây
     }, RECONNECT_TIMEOUT);
 }
 
 wss.on("connection", (ws) => {
-    console.log("New connection");
+    console.log("New connection established");
 
     ws.on("message", (data) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
+        // --- JOIN / RECONNECT ---
         if (msg.type === "join") {
             const existingId = msg.playerId;
 
-            // 1. TRƯỜNG HỢP RECONNECT (Quan trọng nhất)
             if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
-                console.log("Player reconnecting:", existingId);
-                
-                // Hủy đếm ngược xóa
                 if (disconnectedPlayers[existingId]) {
                     clearTimeout(disconnectedPlayers[existingId]);
                     delete disconnectedPlayers[existingId];
                 }
-
-                // Cập nhật socket mới
                 ws.playerId = existingId;
                 players.push({ ws, playerId: existingId });
-
-                // Gửi trạng thái hiện tại cho người vừa quay lại
                 sendToGM(ws, { type: "reconnect", matchState: match });
                 broadcast({ type: "player_reconnected", playerId: existingId });
                 return;
             }
 
-            // 2. TRƯỜNG HỢP MỚI HOÀN TOÀN
-            if (!existingId) {
-                if (players.length >= 2) {
-                    sendToGM(ws, { type: "full" });
-                    ws.close();
-                    return;
-                }
+            if (!existingId && players.length < 2) {
                 const newId = randomUUID();
                 ws.playerId = newId;
                 sendToGM(ws, { type: "assign_id", playerId: newId });
-                
                 players.push({ ws, playerId: newId });
                 sendToGM(ws, { type: "wait", count: players.length });
-
                 if (players.length === 2) startMatch();
-            } 
-            else {
-                // Có ID nhưng không nằm trong danh sách trận hiện tại (ID cũ từ trận trước)
-                sendToGM(ws, { type: "full" }); 
+            } else {
+                sendToGM(ws, { type: "full" });
                 ws.close();
             }
         }
 
-        // GUESS LOGIC
+        // --- GUESS LOGIC ---
         if (msg.type === "guess" && typeof msg.value === "number") {
-            const playerIndex = match.playerIds.indexOf(ws.playerId);
-            if (playerIndex === -1) return;
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            // Ignore if player not in match or if it's not the "playing" phase
+            if (pIdx === -1 || match.status !== "playing") return;
 
-            match.guesses[playerIndex][match.currentTurn - 1] = msg.value;
+            // Prevent double-guessing in the same turn
+            if (match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
+
+            match.guesses[pIdx][match.currentTurn - 1] = msg.value;
             const turnGuesses = match.guesses.map(g => g[match.currentTurn - 1]);
-            
+
+            // If both players have guessed
             if (turnGuesses.length === 2 && turnGuesses.every(g => g !== undefined)) {
+                match.status = "results"; // Block further guesses
+                const resultDice = match.diceRolls[match.currentTurn - 1];
+
+                // Calculate turn score
+                if (turnGuesses[0] === resultDice) match.scores[0]++;
+                if (turnGuesses[1] === resultDice) match.scores[1]++;
+
                 broadcast({
                     type: "turn_result",
                     turn: match.currentTurn,
-                    dice: match.diceRolls[match.currentTurn - 1],
-                    guesses: turnGuesses
+                    dice: resultDice,
+                    guesses: turnGuesses,
+                    updatedScores: match.scores
                 });
-                setTimeout(nextTurn, 1500);
+
+                // Wait 3 seconds so GameMaker can play animations
+                setTimeout(nextTurn, 3000);
             }
         }
     });
@@ -182,4 +194,6 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Server on ${PORT}`));
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Dice Server running on port ${PORT}`);
+});
