@@ -1,32 +1,32 @@
 const http = require("http");
 const WebSocket = require("ws");
+const { randomUUID } = require("crypto");
 
 const PORT = process.env.PORT || 8080;
-const TURNS = 6; // number of turns in a match
+const TURNS = 6;
+const RECONNECT_TIMEOUT = 30000; // 30 seconds
 
-// Create HTTP server (needed for WebSocket)
 const server = http.createServer();
-
 const wss = new WebSocket.Server({ server });
 
-// Keep track of connected players
-let players = [];
+// Track connected players
+let players = []; // { ws, playerId }
+let disconnectedPlayers = {}; // { playerId: timeout }
 
 // Match state
 let match = {
-    diceRolls: [],        // shuffled dice values [1,2,3,4,5,6]
-    guesses: [[], []],    // players' guesses per turn
-    currentTurn: 0
+    diceRolls: [],
+    guesses: [[], []],
+    currentTurn: 0,
+    playerIds: []
 };
 
-// Safely parse JSON from GameMaker
+// JSON safe parse
 function safeJSON(data) {
     try {
         if (typeof data === "string") return JSON.parse(data);
-        const text = Buffer.from(data).toString("utf8");
-        return JSON.parse(text);
-    } catch (e) {
-        console.log("Invalid JSON received:", data);
+        return JSON.parse(Buffer.from(data).toString("utf8"));
+    } catch {
         return null;
     }
 }
@@ -35,13 +35,11 @@ function safeJSON(data) {
 function broadcast(obj) {
     const msg = JSON.stringify(obj);
     players.forEach(p => {
-        if (p.readyState === WebSocket.OPEN) {
-            p.send(msg);
-        }
+        if (p.ws.readyState === WebSocket.OPEN) p.ws.send(msg);
     });
 }
 
-// Shuffle dice array [1,2,3,4,5,6]
+// Shuffle dice [1-6]
 function rollDice() {
     const arr = [1, 2, 3, 4, 5, 6];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -51,52 +49,43 @@ function rollDice() {
     return arr;
 }
 
-// Start a new match
+// Start match
 function startMatch() {
     match.diceRolls = rollDice();
     match.guesses = [[], []];
     match.currentTurn = 0;
+    match.playerIds = players.map(p => p.playerId);
 
     console.log("Match dice rolls:", match.diceRolls);
 
-    // Tell players the match is starting
     broadcast({ type: "match_start", turns: TURNS });
 
-    // Start first turn
     nextTurn();
 }
 
-// Handle next turn
+// Next turn
 function nextTurn() {
     if (match.currentTurn >= TURNS) {
         endMatch();
         return;
     }
 
-    const turnIndex = match.currentTurn;
-
-    // Inform players that dice has been rolled for this turn
-    broadcast({ type: "turn_start", turn: turnIndex + 1 });
-
+    broadcast({ type: "turn_start", turn: match.currentTurn + 1 });
     match.currentTurn++;
 }
 
-// End the match and calculate winner
+// End match
 function endMatch() {
-    const results = [0, 0]; // correct guesses per player
-
+    const results = [0, 0];
     for (let i = 0; i < TURNS; i++) {
-        for (let p = 0; p < players.length; p++) {
-            if (match.guesses[p][i] === match.diceRolls[i]) {
-                results[p]++;
-            }
+        for (let p = 0; p < 2; p++) {
+            if (match.guesses[p][i] === match.diceRolls[i]) results[p]++;
         }
     }
 
     let winner = null;
     if (results[0] > results[1]) winner = 0;
     else if (results[1] > results[0]) winner = 1;
-    // tie => winner = null
 
     broadcast({
         type: "match_end",
@@ -105,43 +94,87 @@ function endMatch() {
         results,
         winner
     });
+
+    // Reset everything
+    match = { diceRolls: [], guesses: [[], []], currentTurn: 0, playerIds: [] };
+    players = [];
+}
+
+// Handle disconnect
+function handleDisconnect(player) {
+    console.log("Player disconnected:", player.playerId);
+
+    players = players.filter(p => p !== player);
+    broadcast({ type: "opponent_left" });
+
+    // Start 30-second timeout for reconnection
+    disconnectedPlayers[player.playerId] = setTimeout(() => {
+        console.log("Match ended due to timeout for player:", player.playerId);
+        if (players.length < 2) endMatch();
+        delete disconnectedPlayers[player.playerId];
+    }, RECONNECT_TIMEOUT);
+}
+
+// Handle reconnect
+function handleReconnect(ws, playerId) {
+    console.log("Player reconnected:", playerId);
+
+    if (disconnectedPlayers[playerId]) {
+        clearTimeout(disconnectedPlayers[playerId]);
+        delete disconnectedPlayers[playerId];
+    }
+
+    players.push({ ws, playerId });
+    ws.send(JSON.stringify({ type: "reconnect", matchState: match }));
+    broadcast({ type: "player_reconnected", playerId });
 }
 
 wss.on("connection", (ws) => {
-    console.log("Player connected");
-
-    if (players.length >= 2) {
-        ws.send(JSON.stringify({ type: "full" }));
-        ws.close();
-        return;
-    }
-
-    players.push(ws);
-    ws.send(JSON.stringify({ type: "wait", count: players.length }));
-
-    // If 2 players connected, start match
-    if (players.length === 2) {
-        startMatch();
-    }
+    console.log("New WebSocket connected");
 
     ws.on("message", (data) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
-        console.log("CLIENT:", msg);
+        // Join / reconnect
+        if (msg.type === "join") {
+            if (!msg.playerId) {
+                // Assign new playerId
+                const newId = randomUUID();
+                ws.playerId = newId;
+                ws.send(JSON.stringify({ type: "assign_id", playerId: newId }));
+                return;
+            }
 
-        // Handle player's guess
+            ws.playerId = msg.playerId;
+
+            if (disconnectedPlayers[msg.playerId]) {
+                handleReconnect(ws, msg.playerId);
+                return;
+            }
+
+            if (players.length >= 2) {
+                ws.send(JSON.stringify({ type: "full" }));
+                ws.close();
+                return;
+            }
+
+            players.push({ ws, playerId: msg.playerId });
+            ws.send(JSON.stringify({ type: "wait", count: players.length }));
+
+            if (players.length === 2) startMatch();
+            return;
+        }
+
+        // Guess
         if (msg.type === "guess" && typeof msg.value === "number") {
-            const playerIndex = players.indexOf(ws);
+            const playerIndex = match.playerIds.indexOf(ws.playerId);
             if (playerIndex === -1) return;
 
-            // Save guess for the current turn
             match.guesses[playerIndex][match.currentTurn - 1] = msg.value;
 
-            // Check if both players guessed for this turn
             const turnGuesses = match.guesses.map(g => g[match.currentTurn - 1]);
             if (turnGuesses.every(g => g !== undefined)) {
-                // Reveal dice result for this turn
                 const turnIndex = match.currentTurn - 1;
                 broadcast({
                     type: "turn_result",
@@ -150,25 +183,14 @@ wss.on("connection", (ws) => {
                     guesses: turnGuesses
                 });
 
-                // Move to next turn after short delay
                 setTimeout(nextTurn, 1000);
             }
         }
     });
 
     ws.on("close", () => {
-        console.log("Player disconnected");
-        players = players.filter(p => p !== ws);
-
-        // Notify remaining player
-        broadcast({ type: "opponent_left" });
-
-        // Reset match if a player leaves
-        match = {
-            diceRolls: [],
-            guesses: [[], []],
-            currentTurn: 0
-        };
+        if (!ws.playerId) return;
+        handleDisconnect({ ws, playerId: ws.playerId });
     });
 });
 
