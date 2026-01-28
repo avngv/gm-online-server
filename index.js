@@ -19,6 +19,16 @@ let match = {
     playerIds: []
 };
 
+/**
+ * Helper to send JSON to GameMaker with a null terminator
+ */
+function sendToGM(ws, obj) {
+    if (ws.readyState === WebSocket.OPEN) {
+        const msg = JSON.stringify(obj) + "\0"; 
+        ws.send(msg);
+    }
+}
+
 function safeJSON(data) {
     try {
         if (typeof data === "string") return JSON.parse(data);
@@ -29,9 +39,8 @@ function safeJSON(data) {
 }
 
 function broadcast(obj) {
-    const msg = JSON.stringify(obj);
     players.forEach(p => {
-        if (p.ws.readyState === WebSocket.OPEN) p.ws.send(msg);
+        sendToGM(p.ws, obj);
     });
 }
 
@@ -111,7 +120,7 @@ function handleReconnect(ws, playerId) {
     ws.playerId = playerId;
     players.push({ ws, playerId });
 
-    ws.send(JSON.stringify({ type: "reconnect", matchState: match }));
+    sendToGM(ws, { type: "reconnect", matchState: match });
     broadcast({ type: "player_reconnected", playerId });
 }
 
@@ -127,7 +136,7 @@ wss.on("connection", (ws) => {
             if (!msg.playerId) {
                 const newId = randomUUID();
                 ws.playerId = newId;
-                ws.send(JSON.stringify({ type: "assign_id", playerId: newId }));
+                sendToGM(ws, { type: "assign_id", playerId: newId });
                 return;
             }
 
@@ -139,14 +148,14 @@ wss.on("connection", (ws) => {
             }
 
             if (players.length >= 2) {
-                ws.send(JSON.stringify({ type: "full" }));
+                sendToGM(ws, { type: "full" });
                 ws.close();
                 return;
             }
 
             players.push({ ws, playerId: msg.playerId });
             match.playerIds.push(msg.playerId);
-            ws.send(JSON.stringify({ type: "wait", count: players.length }));
+            sendToGM(ws, { type: "wait", count: players.length });
 
             if (players.length === 2) startMatch();
             return;
@@ -180,6 +189,6 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
     console.log("Server running on port", PORT);
 });
