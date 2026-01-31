@@ -56,29 +56,27 @@ function rollDice() {
 }
 
 function startMatch() {
-    if (turnTimer) clearTimeout(turnTimer); // Clear any pending auto-start timers
-
-    match.diceRolls = rollDice();
-    match.guesses = [[], []];
-    match.currentTurn = 0;
-    match.playerIds = players.map(p => p.playerId);
-    match.playerLoadouts = players.map(p => p.equipments); 
-    match.roundReady = [false, false]; 
+    // FORCE CLEAR everything to prevent "Stuck" state
+    if (turnTimer) clearTimeout(turnTimer); 
     
     match.status = "preparing";
-    console.log("Round starting now.");
+    match.currentTurn = 0; // RESET POINTER IMMEDIATELY
+    match.guesses = [[], []];
+    match.diceRolls = rollDice();
+    match.roundReady = [false, false];
+    match.animsFinished = [true, true]; // Reset these so they don't block the next turn
 
-    players.forEach((p, index) => {
-        const opponentIndex = index === 0 ? 1 : 0;
-        sendToGM(p.ws, { 
-            type: "game_prepare", 
-            yourIndex: index, 
-            opponentSlotCount: players[opponentIndex].equipments.length 
-        });
+    console.log("Starting New Dice Round...");
+
+    // Inform clients Turn 0 is happening (The Reset)
+    broadcast({ 
+        type: "game_prepare", 
+        turn: 0,
+        message: "New Round Beginning"
     });
     
-    // Tiny delay so clients can reset their UI before the first turn begins
-    setTimeout(nextTurn, 500);
+    // Immediate call to Turn 1 (No 500ms delay to eliminate lag)
+    nextTurn();
 }
 
 function nextTurn() {
@@ -86,6 +84,7 @@ function nextTurn() {
         endRound();
         return;
     }
+    
     match.currentTurn++;
     match.status = "playing";
     match.animsFinished = [false, false]; 
@@ -101,6 +100,7 @@ function nextTurn() {
 }
 
 function handleAFK() {
+    if (match.status !== "playing") return;
     players.forEach((p, i) => {
         if (match.guesses[i][match.currentTurn - 1] === undefined) {
             const loadout = match.playerLoadouts[i];
@@ -143,8 +143,11 @@ function processResults(g1, g2) {
         firstActor: firstActor
     });
 
+    // Safety timeout to ensure game never gets stuck in "results"
     if (turnTimer) clearTimeout(turnTimer);
-    turnTimer = setTimeout(() => { if (match.status === "results") nextTurn(); }, ANIM_SAFETY_TIMEOUT);
+    turnTimer = setTimeout(() => { 
+        if (match.status === "results") nextTurn(); 
+    }, ANIM_SAFETY_TIMEOUT);
 }
 
 function endRound() {
@@ -153,15 +156,12 @@ function endRound() {
 
     broadcast({
         type: "new_dice_round",
-        message: "Round finished. Waiting for players to be ready...",
+        message: "Round finished.",
         currentScores: match.scores
     });
 
-    // Auto-start safety: if someone goes AFK after a round, start anyway after 10s
+    // We do NOT call startMatch here. We wait for player ready signals.
     if (turnTimer) clearTimeout(turnTimer);
-    turnTimer = setTimeout(() => {
-        if (match.status === "round_wait") startMatch();
-    }, 10000);
 }
 
 // --- SERVER CORE ---
@@ -170,6 +170,7 @@ wss.on("connection", (ws) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
+        // JOIN Logic
         if (msg.type === "join") {
             const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
@@ -193,6 +194,7 @@ wss.on("connection", (ws) => {
             }
         }
 
+        // GUESS Logic
         if (msg.type === "guess" && match.status === "playing") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
@@ -200,6 +202,7 @@ wss.on("connection", (ws) => {
             checkTurnCompletion();
         }
 
+        // ANIMATION DONE Logic
         if (msg.type === "anim_done" && match.status === "results") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
@@ -211,18 +214,13 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // --- THE READY CHECK ---
+        // READY CHECK - Starts the round immediately
         if (msg.type === "round_ready" && match.status === "round_wait") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
                 match.roundReady[pIdx] = true;
-                
-                // Optional: Let the other player know their opponent is ready
-                broadcast({ type: "opponent_ready", playerIndex: pIdx });
-
                 if (match.roundReady[0] && match.roundReady[1]) {
-                    console.log("Both ready! Skipping timer.");
-                    startMatch(); // Starts the next 6 turns immediately
+                    startMatch(); 
                 }
             }
         }
