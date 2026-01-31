@@ -66,9 +66,8 @@ function startMatch() {
     match.playerLoadouts = players.map(p => p.equipments); 
     
     match.status = "preparing";
-    console.log("Match Found. Equipment counts synchronized.");
+    console.log("Match Found. Syncing hidden slot counts.");
 
-    // Send CUSTOM game_prepare to each player with opponent's slot count
     players.forEach((p, index) => {
         const opponentIndex = index === 0 ? 1 : 0;
         const opponentItemCount = players[opponentIndex].equipments.length;
@@ -180,15 +179,22 @@ wss.on("connection", (ws) => {
             if (pIdx === -1 || match.status !== "playing") return;
             if (match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
 
-            // Store guess + slot
+            // USE SLOT_INDEX
+            const sIdx = msg.slot_index;
+            const loadout = match.playerLoadouts[pIdx];
+
+            // Validation
+            if (sIdx === undefined || sIdx < 0 || sIdx >= loadout.length) return;
+
+            // Store guess + slot_index + the specific item string
             match.guesses[pIdx][match.currentTurn - 1] = {
                 value: msg.value,
-                slot: msg.slot,
-                item: match.playerLoadouts[pIdx][msg.slot] 
+                slot: sIdx,
+                item: loadout[sIdx] 
             };
 
-            const g1 = match.guesses[0][match.currentTurn-1];
-            const g2 = match.guesses[1][match.currentTurn-1];
+            const g1 = match.guesses[0][match.currentTurn - 1];
+            const g2 = match.guesses[1][match.currentTurn - 1];
 
             if (g1 && g2) {
                 match.status = "results";
@@ -202,7 +208,6 @@ wss.on("connection", (ws) => {
                     turn: match.currentTurn,
                     dice: resultDice,
                     updatedScores: match.scores,
-                    // Send the slots used so GM can reveal them
                     slotsUsed: [g1.slot, g2.slot] 
                 });
 
