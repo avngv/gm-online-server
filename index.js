@@ -130,7 +130,7 @@ function processResults(g1, g2) {
     if (p1Success) match.scores[0]++;
     if (p2Success) match.scores[1]++;
 
-    // Priority: Higher guess goes first. -1 = Tie (Simultaneous)
+    // Priority: Higher guess goes first.
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
     else if (g2.value > g1.value) firstActor = 1;
@@ -139,8 +139,20 @@ function processResults(g1, g2) {
         type: "turn_result",
         dice: resultDice,
         updatedScores: match.scores,
-        p1: { slot: g1.slot, guess: g1.value, success: p1Success, afk: !!g1.afk },
-        p2: { slot: g2.slot, guess: g2.value, success: p2Success, afk: !!g2.afk },
+        p1: { 
+            slot: g1.slot, 
+            itemName: match.playerLoadouts[0][g1.slot], // Returns name like "Sword" or "Fireball"
+            guess: g1.value, 
+            success: p1Success, 
+            afk: !!g1.afk 
+        },
+        p2: { 
+            slot: g2.slot, 
+            itemName: match.playerLoadouts[1][g2.slot], // Returns name like "Shield" or "Bow"
+            guess: g2.value, 
+            success: p2Success, 
+            afk: !!g2.afk 
+        },
         firstActor: firstActor
     });
 
