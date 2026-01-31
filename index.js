@@ -18,11 +18,11 @@ let match = {
     scores: [0, 0],
     currentTurn: 0,
     playerIds: [],
+    playerLoadouts: [[], []], 
     status: "waiting" 
 };
 
-// --- UTILITY FUNCTIONS ---
-
+// --- UTILITIES ---
 function sendToGM(ws, obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         const msg = JSON.stringify(obj) + "\0"; 
@@ -41,7 +41,6 @@ function broadcast(obj) {
     players.forEach(p => sendToGM(p.ws, obj));
 }
 
-// Sends to everyone EXCEPT the person who triggered it (prevents UI double-popups)
 function broadcastExcept(excludeWs, obj) {
     players.forEach(p => {
         if (p.ws !== excludeWs) sendToGM(p.ws, obj);
@@ -49,7 +48,6 @@ function broadcastExcept(excludeWs, obj) {
 }
 
 // --- GAME LOGIC ---
-
 function rollDice() {
     const arr = [1, 2, 3, 4, 5, 6];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -65,12 +63,21 @@ function startMatch() {
     match.scores = [0, 0];
     match.currentTurn = 0;
     match.playerIds = players.map(p => p.playerId);
-    match.status = "preparing";
-
-    console.log("Match Found. Preparing game...");
+    match.playerLoadouts = players.map(p => p.equipments); 
     
-    // FIXED: Removed playerIds from broadcast to keep them private
-    broadcast({ type: "game_prepare" }); 
+    match.status = "preparing";
+    console.log("Match Found. Equipment counts synchronized.");
+
+    // Send CUSTOM game_prepare to each player with opponent's slot count
+    players.forEach((p, index) => {
+        const opponentIndex = index === 0 ? 1 : 0;
+        const opponentItemCount = players[opponentIndex].equipments.length;
+        
+        sendToGM(p.ws, { 
+            type: "game_prepare", 
+            opponentSlotCount: opponentItemCount 
+        });
+    });
     
     setTimeout(nextTurn, 3000);
 }
@@ -91,9 +98,7 @@ function nextTurn() {
 
 function endMatch() {
     match.status = "finished";
-    let winnerId = -1;
-    if (match.scores[0] > match.scores[1]) winnerId = 0;
-    else if (match.scores[1] > match.scores[0]) winnerId = 1;
+    let winnerId = (match.scores[0] > match.scores[1]) ? 0 : (match.scores[1] > match.scores[0] ? 1 : -1);
 
     broadcast({
         type: "match_end",
@@ -117,12 +122,9 @@ function handleDisconnect(ws) {
 
     console.log("Player disconnected:", playerId);
     players = players.filter(p => p.playerId !== playerId);
-    
-    // FIXED: Removed playerId from broadcast to keep it private
     broadcastExcept(ws, { type: "opponent_left" });
 
     disconnectedPlayers[playerId] = setTimeout(() => {
-        console.log("Grace period expired for:", playerId);
         delete disconnectedPlayers[playerId];
         if (match.playerIds.includes(playerId)) {
             match.status = "waiting";
@@ -132,15 +134,14 @@ function handleDisconnect(ws) {
 }
 
 // --- SERVER CORE ---
-
 wss.on("connection", (ws) => {
     ws.on("message", (data) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
-        // JOIN / RECONNECT LOGIC
         if (msg.type === "join") {
             const existingId = msg.playerId;
+            const clientEquips = msg.equipments || [];
 
             if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
                 if (disconnectedPlayers[existingId]) {
@@ -149,12 +150,9 @@ wss.on("connection", (ws) => {
                 }
                 
                 ws.playerId = existingId;
-                players.push({ ws, playerId: existingId });
+                players.push({ ws, playerId: existingId, equipments: clientEquips });
                 
-                console.log("Player reconnected:", existingId);
-                sendToGM(ws, { type: "reconnect", matchState: match });
-                
-                // FIXED: Notify opponent without leaking the ID
+                sendToGM(ws, { type: "reconnect", matchState: match, equipments: clientEquips });
                 broadcastExcept(ws, { type: "player_reconnected" });
                 return;
             }
@@ -162,15 +160,12 @@ wss.on("connection", (ws) => {
             if (!existingId && players.length < 2) {
                 const newId = randomUUID();
                 ws.playerId = newId;
-                
-                // Only the owner knows this ID
-                sendToGM(ws, { type: "assign_id", playerId: newId });
-                
-                players.push({ ws, playerId: newId });
+                players.push({ ws, playerId: newId, equipments: clientEquips });
 
-                if (players.length === 1) {
-                    sendToGM(ws, { type: "wait", count: 1 });
-                } else if (players.length === 2) {
+                sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
+
+                if (players.length === 1) sendToGM(ws, { type: "wait", count: 1 });
+                else if (players.length === 2) {
                     broadcast({ type: "player_joined", count: 2 });
                     startMatch();
                 }
@@ -180,47 +175,43 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // GUESS LOGIC
-        if (msg.type === "guess" && typeof msg.value === "number") {
-            // FIXED: Server uses ws.playerId (the socket) to identify the player.
-            // Even if a player tries to send someone else's ID in the packet, it is ignored.
+        if (msg.type === "guess") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
-            
             if (pIdx === -1 || match.status !== "playing") return;
             if (match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
 
-            match.guesses[pIdx][match.currentTurn - 1] = msg.value;
-            const turnGuesses = [match.guesses[0][match.currentTurn-1], match.guesses[1][match.currentTurn-1]];
+            // Store guess + slot
+            match.guesses[pIdx][match.currentTurn - 1] = {
+                value: msg.value,
+                slot: msg.slot,
+                item: match.playerLoadouts[pIdx][msg.slot] 
+            };
 
-            if (turnGuesses[0] !== undefined && turnGuesses[1] !== undefined) {
+            const g1 = match.guesses[0][match.currentTurn-1];
+            const g2 = match.guesses[1][match.currentTurn-1];
+
+            if (g1 && g2) {
                 match.status = "results";
                 const resultDice = match.diceRolls[match.currentTurn - 1];
 
-                if (turnGuesses[0] === resultDice) match.scores[0]++;
-                if (turnGuesses[1] === resultDice) match.scores[1]++;
+                if (g1.value === resultDice) match.scores[0]++;
+                if (g2.value === resultDice) match.scores[1]++;
 
                 broadcast({
                     type: "turn_result",
                     turn: match.currentTurn,
                     dice: resultDice,
-                    guesses: turnGuesses,
-                    updatedScores: match.scores
+                    updatedScores: match.scores,
+                    // Send the slots used so GM can reveal them
+                    slotsUsed: [g1.slot, g2.slot] 
                 });
 
                 setTimeout(nextTurn, 2000);
             }
         }
-        
-        if (msg.type === "quit") {
-            ws.close();
-        }
     });
 
-    ws.on("close", () => {
-        handleDisconnect(ws);
-    });
+    ws.on("close", () => handleDisconnect(ws));
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
