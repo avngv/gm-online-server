@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 8080;
 const TURNS = 6;
 const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; // 10 Seconds for choosing
-const ANIM_SAFETY_TIMEOUT = 5000; // 5 Seconds max for animation phase
+const ANIM_SAFETY_TIMEOUT = 15000; // 5 Seconds max for animation phase
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
