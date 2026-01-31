@@ -4,7 +4,7 @@ const { randomUUID } = require("crypto");
 
 const PORT = process.env.PORT || 8080;
 const TURNS = 6;
-const RECONNECT_TIMEOUT = 30000;
+const RECONNECT_TIMEOUT = 30000; 
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
@@ -18,8 +18,10 @@ let match = {
     scores: [0, 0],
     currentTurn: 0,
     playerIds: [],
-    status: "waiting" // waiting, preparing, playing, results, finished
+    status: "waiting" 
 };
+
+// --- UTILITY FUNCTIONS ---
 
 function sendToGM(ws, obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -39,6 +41,15 @@ function broadcast(obj) {
     players.forEach(p => sendToGM(p.ws, obj));
 }
 
+// Sends to everyone EXCEPT the person who triggered it (prevents UI double-popups)
+function broadcastExcept(excludeWs, obj) {
+    players.forEach(p => {
+        if (p.ws !== excludeWs) sendToGM(p.ws, obj);
+    });
+}
+
+// --- GAME LOGIC ---
+
 function rollDice() {
     const arr = [1, 2, 3, 4, 5, 6];
     for (let i = arr.length - 1; i > 0; i--) {
@@ -48,7 +59,6 @@ function rollDice() {
     return arr;
 }
 
-// --- NEW PREPARE STAGE ---
 function startMatch() {
     match.diceRolls = rollDice();
     match.guesses = [[], []];
@@ -59,10 +69,9 @@ function startMatch() {
 
     console.log("Match Found. Preparing game...");
     
-    // Tell players the match is starting soon
-    broadcast({ type: "game_prepare", playerIds: match.playerIds });
-
-    // Wait 3 seconds for players to see "Opponent Found" or "Game Starting" UI
+    // FIXED: Removed playerIds from broadcast to keep them private
+    broadcast({ type: "game_prepare" }); 
+    
     setTimeout(nextTurn, 3000);
 }
 
@@ -102,21 +111,34 @@ function endMatch() {
     }, 10000);
 }
 
-function handleDisconnect(player) {
-    console.log("Player disconnected:", player.playerId);
-    players = players.filter(p => p.playerId !== player.playerId);
-    broadcast({ type: "opponent_left" });
+function handleDisconnect(ws) {
+    const playerId = ws.playerId;
+    if (!playerId) return;
 
-    disconnectedPlayers[player.playerId] = setTimeout(() => {
-        delete disconnectedPlayers[player.playerId];
+    console.log("Player disconnected:", playerId);
+    players = players.filter(p => p.playerId !== playerId);
+    
+    // FIXED: Removed playerId from broadcast to keep it private
+    broadcastExcept(ws, { type: "opponent_left" });
+
+    disconnectedPlayers[playerId] = setTimeout(() => {
+        console.log("Grace period expired for:", playerId);
+        delete disconnectedPlayers[playerId];
+        if (match.playerIds.includes(playerId)) {
+            match.status = "waiting";
+            match.playerIds = [];
+        }
     }, RECONNECT_TIMEOUT);
 }
+
+// --- SERVER CORE ---
 
 wss.on("connection", (ws) => {
     ws.on("message", (data) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
+        // JOIN / RECONNECT LOGIC
         if (msg.type === "join") {
             const existingId = msg.playerId;
 
@@ -125,27 +147,31 @@ wss.on("connection", (ws) => {
                     clearTimeout(disconnectedPlayers[existingId]);
                     delete disconnectedPlayers[existingId];
                 }
+                
                 ws.playerId = existingId;
                 players.push({ ws, playerId: existingId });
+                
+                console.log("Player reconnected:", existingId);
                 sendToGM(ws, { type: "reconnect", matchState: match });
-                broadcast({ type: "player_reconnected", playerId: existingId });
+                
+                // FIXED: Notify opponent without leaking the ID
+                broadcastExcept(ws, { type: "player_reconnected" });
                 return;
             }
 
             if (!existingId && players.length < 2) {
                 const newId = randomUUID();
                 ws.playerId = newId;
+                
+                // Only the owner knows this ID
                 sendToGM(ws, { type: "assign_id", playerId: newId });
                 
                 players.push({ ws, playerId: newId });
 
-                // --- NEW: INFORM OTHERS ABOUT CONNECTION ---
                 if (players.length === 1) {
                     sendToGM(ws, { type: "wait", count: 1 });
                 } else if (players.length === 2) {
-                    // Tell the first player that someone joined
                     broadcast({ type: "player_joined", count: 2 });
-                    // Start the preparation delay
                     startMatch();
                 }
             } else {
@@ -154,15 +180,19 @@ wss.on("connection", (ws) => {
             }
         }
 
+        // GUESS LOGIC
         if (msg.type === "guess" && typeof msg.value === "number") {
+            // FIXED: Server uses ws.playerId (the socket) to identify the player.
+            // Even if a player tries to send someone else's ID in the packet, it is ignored.
             const pIdx = match.playerIds.indexOf(ws.playerId);
+            
             if (pIdx === -1 || match.status !== "playing") return;
             if (match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
 
             match.guesses[pIdx][match.currentTurn - 1] = msg.value;
-            const turnGuesses = match.guesses.map(g => g[match.currentTurn - 1]);
+            const turnGuesses = [match.guesses[0][match.currentTurn-1], match.guesses[1][match.currentTurn-1]];
 
-            if (turnGuesses.length === 2 && turnGuesses.every(g => g !== undefined)) {
+            if (turnGuesses[0] !== undefined && turnGuesses[1] !== undefined) {
                 match.status = "results";
                 const resultDice = match.diceRolls[match.currentTurn - 1];
 
@@ -177,13 +207,17 @@ wss.on("connection", (ws) => {
                     updatedScores: match.scores
                 });
 
-                setTimeout(nextTurn, 1000);
+                setTimeout(nextTurn, 2000);
             }
+        }
+        
+        if (msg.type === "quit") {
+            ws.close();
         }
     });
 
     ws.on("close", () => {
-        if (ws.playerId) handleDisconnect({ ws, playerId: ws.playerId });
+        handleDisconnect(ws);
     });
 });
 
