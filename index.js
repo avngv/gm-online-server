@@ -124,13 +124,14 @@ function processResults(g1, g2) {
     match.status = "results";
     const resultDice = match.diceRolls[match.currentTurn - 1];
 
-    const p1Success = g1.value === resultDice;
-    const p2Success = g2.value === resultDice;
+    // UPDATED LOGIC: Guess must be less than or equal to the dice roll
+    const p1Success = g1.value <= resultDice;
+    const p2Success = g2.value <= resultDice;
 
     if (p1Success) match.scores[0]++;
     if (p2Success) match.scores[1]++;
 
-    // Priority: Higher guess goes first.
+    // Priority remains: Higher guess goes first
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
     else if (g2.value > g1.value) firstActor = 1;
@@ -141,17 +142,15 @@ function processResults(g1, g2) {
         updatedScores: match.scores,
         p1: { 
             slot: g1.slot, 
-            itemName: match.playerLoadouts[0][g1.slot], // Returns name like "Sword" or "Fireball"
+            itemName: match.playerLoadouts[0][g1.slot],
             guess: g1.value, 
-            success: p1Success, 
-            afk: !!g1.afk 
+            success: p1Success 
         },
         p2: { 
             slot: g2.slot, 
-            itemName: match.playerLoadouts[1][g2.slot], // Returns name like "Shield" or "Bow"
+            itemName: match.playerLoadouts[1][g2.slot],
             guess: g2.value, 
-            success: p2Success, 
-            afk: !!g2.afk 
+            success: p2Success 
         },
         firstActor: firstActor
     });
