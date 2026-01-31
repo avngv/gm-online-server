@@ -4,13 +4,15 @@ const { randomUUID } = require("crypto");
 
 const PORT = process.env.PORT || 8080;
 const TURNS = 6;
-const RECONNECT_TIMEOUT = 30000; 
+const RECONNECT_TIMEOUT = 30000;
+const TURN_TIME_LIMIT = 10000; // 10 Seconds
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
 let players = []; 
 let disconnectedPlayers = {}; 
+let turnTimer = null;
 
 let match = {
     diceRolls: [],
@@ -25,8 +27,7 @@ let match = {
 // --- UTILITIES ---
 function sendToGM(ws, obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
-        const msg = JSON.stringify(obj) + "\0"; 
-        ws.send(msg);
+        ws.send(JSON.stringify(obj) + "\0");
     }
 }
 
@@ -41,20 +42,10 @@ function broadcast(obj) {
     players.forEach(p => sendToGM(p.ws, obj));
 }
 
-function broadcastExcept(excludeWs, obj) {
-    players.forEach(p => {
-        if (p.ws !== excludeWs) sendToGM(p.ws, obj);
-    });
-}
-
 // --- GAME LOGIC ---
 function rollDice() {
-    const arr = [1, 2, 3, 4, 5, 6];
-    for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
+    // Generate all dice results for the match upfront
+    return Array.from({length: TURNS}, () => Math.floor(Math.random() * 6) + 1);
 }
 
 function startMatch() {
@@ -66,15 +57,15 @@ function startMatch() {
     match.playerLoadouts = players.map(p => p.equipments); 
     
     match.status = "preparing";
-    console.log("Match Found. Syncing hidden slot counts.");
+    console.log("Match starting. Assigning roles...");
 
+    // Send game_prepare and tell each client exactly who they are (0 or 1)
     players.forEach((p, index) => {
         const opponentIndex = index === 0 ? 1 : 0;
-        const opponentItemCount = players[opponentIndex].equipments.length;
-        
         sendToGM(p.ws, { 
             type: "game_prepare", 
-            opponentSlotCount: opponentItemCount 
+            yourIndex: index, // 0 = Player 1, 1 = Player 2
+            opponentSlotCount: players[opponentIndex].equipments.length 
         });
     });
     
@@ -88,11 +79,72 @@ function nextTurn() {
     }
     match.currentTurn++;
     match.status = "playing";
+    
     broadcast({ 
         type: "turn_start", 
         turn: match.currentTurn,
         scores: match.scores 
     });
+
+    // Start 10s Timer
+    if (turnTimer) clearTimeout(turnTimer);
+    turnTimer = setTimeout(handleAFK, TURN_TIME_LIMIT);
+}
+
+function handleAFK() {
+    console.log("Turn timer expired. Filling random actions.");
+    players.forEach((p, i) => {
+        if (match.guesses[i][match.currentTurn - 1] === undefined) {
+            const loadout = match.playerLoadouts[i];
+            const randomSlot = Math.floor(Math.random() * loadout.length);
+            const randomDice = Math.floor(Math.random() * 6) + 1;
+
+            match.guesses[i][match.currentTurn - 1] = {
+                value: randomDice,
+                slot: randomSlot,
+                item: loadout[randomSlot],
+                afk: true
+            };
+        }
+    });
+    checkTurnCompletion();
+}
+
+function checkTurnCompletion() {
+    const g1 = match.guesses[0][match.currentTurn - 1];
+    const g2 = match.guesses[1][match.currentTurn - 1];
+
+    if (g1 && g2) {
+        if (turnTimer) clearTimeout(turnTimer);
+        processResults(g1, g2);
+    }
+}
+
+function processResults(g1, g2) {
+    match.status = "results";
+    const resultDice = match.diceRolls[match.currentTurn - 1];
+
+    const p1Success = g1.value === resultDice;
+    const p2Success = g2.value === resultDice;
+
+    if (p1Success) match.scores[0]++;
+    if (p2Success) match.scores[1]++;
+
+    // Priority: Higher guess goes first. -1 = Tie (Simultaneous)
+    let firstActor = -1;
+    if (g1.value > g2.value) firstActor = 0;
+    else if (g2.value > g1.value) firstActor = 1;
+
+    broadcast({
+        type: "turn_result",
+        dice: resultDice,
+        updatedScores: match.scores,
+        p1: { slot: g1.slot, guess: g1.value, success: p1Success, afk: !!g1.afk },
+        p2: { slot: g2.slot, guess: g2.value, success: p2Success, afk: !!g2.afk },
+        firstActor: firstActor
+    });
+
+    setTimeout(nextTurn, 4000);
 }
 
 function endMatch() {
@@ -101,35 +153,14 @@ function endMatch() {
 
     broadcast({
         type: "match_end",
-        diceRolls: match.diceRolls,
         finalScores: match.scores,
         winner: winnerId
     });
 
     setTimeout(() => {
         if (players.length === 2) startMatch();
-        else {
-            match.status = "waiting";
-            broadcast({ type: "wait", count: players.length });
-        }
-    }, 10000);
-}
-
-function handleDisconnect(ws) {
-    const playerId = ws.playerId;
-    if (!playerId) return;
-
-    console.log("Player disconnected:", playerId);
-    players = players.filter(p => p.playerId !== playerId);
-    broadcastExcept(ws, { type: "opponent_left" });
-
-    disconnectedPlayers[playerId] = setTimeout(() => {
-        delete disconnectedPlayers[playerId];
-        if (match.playerIds.includes(playerId)) {
-            match.status = "waiting";
-            match.playerIds = [];
-        }
-    }, RECONNECT_TIMEOUT);
+        else match.status = "waiting";
+    }, 5000);
 }
 
 // --- SERVER CORE ---
@@ -142,81 +173,50 @@ wss.on("connection", (ws) => {
             const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
 
+            // Simple Reconnect
             if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
-                if (disconnectedPlayers[existingId]) {
-                    clearTimeout(disconnectedPlayers[existingId]);
-                    delete disconnectedPlayers[existingId];
-                }
-                
+                clearTimeout(disconnectedPlayers[existingId]);
+                delete disconnectedPlayers[existingId];
                 ws.playerId = existingId;
                 players.push({ ws, playerId: existingId, equipments: clientEquips });
-                
-                sendToGM(ws, { type: "reconnect", matchState: match, equipments: clientEquips });
-                broadcastExcept(ws, { type: "player_reconnected" });
+                sendToGM(ws, { type: "reconnect", matchState: match });
                 return;
             }
 
-            if (!existingId && players.length < 2) {
+            if (players.length < 2) {
                 const newId = randomUUID();
                 ws.playerId = newId;
                 players.push({ ws, playerId: newId, equipments: clientEquips });
-
+                
+                // On initial join, assign ID
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
 
-                if (players.length === 1) sendToGM(ws, { type: "wait", count: 1 });
-                else if (players.length === 2) {
-                    broadcast({ type: "player_joined", count: 2 });
+                if (players.length === 2) {
+                    broadcast({ type: "player_joined" });
                     startMatch();
                 }
-            } else {
-                sendToGM(ws, { type: "full" });
-                ws.close();
             }
         }
 
-        if (msg.type === "guess") {
+        if (msg.type === "guess" && match.status === "playing") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx === -1 || match.status !== "playing") return;
-            if (match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
+            if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
 
-            // USE SLOT_INDEX
-            const sIdx = msg.slot_index;
-            const loadout = match.playerLoadouts[pIdx];
-
-            // Validation
-            if (sIdx === undefined || sIdx < 0 || sIdx >= loadout.length) return;
-
-            // Store guess + slot_index + the specific item string
+            // Use the slot_index from the client
             match.guesses[pIdx][match.currentTurn - 1] = {
                 value: msg.value,
-                slot: sIdx,
-                item: loadout[sIdx] 
+                slot: msg.slot_index,
+                item: match.playerLoadouts[pIdx][msg.slot_index]
             };
-
-            const g1 = match.guesses[0][match.currentTurn - 1];
-            const g2 = match.guesses[1][match.currentTurn - 1];
-
-            if (g1 && g2) {
-                match.status = "results";
-                const resultDice = match.diceRolls[match.currentTurn - 1];
-
-                if (g1.value === resultDice) match.scores[0]++;
-                if (g2.value === resultDice) match.scores[1]++;
-
-                broadcast({
-                    type: "turn_result",
-                    turn: match.currentTurn,
-                    dice: resultDice,
-                    updatedScores: match.scores,
-                    slotsUsed: [g1.slot, g2.slot] 
-                });
-
-                setTimeout(nextTurn, 2000);
-            }
+            checkTurnCompletion();
         }
     });
 
-    ws.on("close", () => handleDisconnect(ws));
+    ws.on("close", () => {
+        const playerId = ws.playerId;
+        players = players.filter(p => p.playerId !== playerId);
+        disconnectedPlayers[playerId] = setTimeout(() => delete disconnectedPlayers[playerId], RECONNECT_TIMEOUT);
+    });
 });
 
 server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
