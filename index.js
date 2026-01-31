@@ -47,7 +47,16 @@ function broadcast(obj) {
 
 // --- GAME LOGIC ---
 function rollDice() {
-    return Array.from({length: TURNS_PER_ROUND}, () => Math.floor(Math.random() * 6) + 1);
+    // 1. Create the set [1, 2, 3, 4, 5, 6]
+    let set = [1, 2, 3, 4, 5, 6];
+
+    // 2. Shuffle the array (Fisher-Yates Shuffle)
+    for (let i = set.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [set[i], set[j]] = [set[j], set[i]];
+    }
+
+    return set;
 }
 
 function startMatch() {
