@@ -5,7 +5,8 @@ const { randomUUID } = require("crypto");
 const PORT = process.env.PORT || 8080;
 const TURNS = 6;
 const RECONNECT_TIMEOUT = 30000;
-const TURN_TIME_LIMIT = 10000; // 10 Seconds
+const TURN_TIME_LIMIT = 10000; // 10 Seconds for choosing
+const ANIM_SAFETY_TIMEOUT = 5000; // 5 Seconds max for animation phase
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
@@ -21,7 +22,8 @@ let match = {
     currentTurn: 0,
     playerIds: [],
     playerLoadouts: [[], []], 
-    status: "waiting" 
+    status: "waiting",
+    animsFinished: [false, false] 
 };
 
 // --- UTILITIES ---
@@ -44,7 +46,6 @@ function broadcast(obj) {
 
 // --- GAME LOGIC ---
 function rollDice() {
-    // Generate all dice results for the match upfront
     return Array.from({length: TURNS}, () => Math.floor(Math.random() * 6) + 1);
 }
 
@@ -57,14 +58,13 @@ function startMatch() {
     match.playerLoadouts = players.map(p => p.equipments); 
     
     match.status = "preparing";
-    console.log("Match starting. Assigning roles...");
+    console.log("Match starting...");
 
-    // Send game_prepare and tell each client exactly who they are (0 or 1)
     players.forEach((p, index) => {
         const opponentIndex = index === 0 ? 1 : 0;
         sendToGM(p.ws, { 
             type: "game_prepare", 
-            yourIndex: index, // 0 = Player 1, 1 = Player 2
+            yourIndex: index, 
             opponentSlotCount: players[opponentIndex].equipments.length 
         });
     });
@@ -79,6 +79,7 @@ function nextTurn() {
     }
     match.currentTurn++;
     match.status = "playing";
+    match.animsFinished = [false, false]; 
     
     broadcast({ 
         type: "turn_start", 
@@ -86,13 +87,12 @@ function nextTurn() {
         scores: match.scores 
     });
 
-    // Start 10s Timer
     if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(handleAFK, TURN_TIME_LIMIT);
 }
 
 function handleAFK() {
-    console.log("Turn timer expired. Filling random actions.");
+    console.log("Selection timer expired. Forcing randoms.");
     players.forEach((p, i) => {
         if (match.guesses[i][match.currentTurn - 1] === undefined) {
             const loadout = match.playerLoadouts[i];
@@ -124,14 +124,13 @@ function processResults(g1, g2) {
     match.status = "results";
     const resultDice = match.diceRolls[match.currentTurn - 1];
 
-    // UPDATED LOGIC: Guess must be less than or equal to the dice roll
+    // SUCCESS LOGIC: Guess <= Dice
     const p1Success = g1.value <= resultDice;
     const p2Success = g2.value <= resultDice;
 
     if (p1Success) match.scores[0]++;
     if (p2Success) match.scores[1]++;
 
-    // Priority remains: Higher guess goes first
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
     else if (g2.value > g1.value) firstActor = 1;
@@ -144,18 +143,27 @@ function processResults(g1, g2) {
             slot: g1.slot, 
             itemName: match.playerLoadouts[0][g1.slot],
             guess: g1.value, 
-            success: p1Success 
+            success: p1Success, 
+            afk: !!g1.afk 
         },
         p2: { 
             slot: g2.slot, 
             itemName: match.playerLoadouts[1][g2.slot],
             guess: g2.value, 
-            success: p2Success 
+            success: p2Success, 
+            afk: !!g2.afk 
         },
         firstActor: firstActor
     });
 
-    setTimeout(nextTurn, 4000);
+    // Start Safety Timeout for Animation Phase
+    if (turnTimer) clearTimeout(turnTimer);
+    turnTimer = setTimeout(() => {
+        if (match.status === "results") {
+            console.log("Animation safety timeout hit.");
+            nextTurn();
+        }
+    }, ANIM_SAFETY_TIMEOUT);
 }
 
 function endMatch() {
@@ -184,7 +192,6 @@ wss.on("connection", (ws) => {
             const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
 
-            // Simple Reconnect
             if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
                 clearTimeout(disconnectedPlayers[existingId]);
                 delete disconnectedPlayers[existingId];
@@ -198,8 +205,6 @@ wss.on("connection", (ws) => {
                 const newId = randomUUID();
                 ws.playerId = newId;
                 players.push({ ws, playerId: newId, equipments: clientEquips });
-                
-                // On initial join, assign ID
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
 
                 if (players.length === 2) {
@@ -213,13 +218,23 @@ wss.on("connection", (ws) => {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
 
-            // Use the slot_index from the client
             match.guesses[pIdx][match.currentTurn - 1] = {
                 value: msg.value,
                 slot: msg.slot_index,
                 item: match.playerLoadouts[pIdx][msg.slot_index]
             };
             checkTurnCompletion();
+        }
+
+        if (msg.type === "anim_done" && match.status === "results") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1) {
+                match.animsFinished[pIdx] = true;
+                if (match.animsFinished[0] && match.animsFinished[1]) {
+                    if (turnTimer) clearTimeout(turnTimer);
+                    nextTurn();
+                }
+            }
         }
     });
 
