@@ -56,8 +56,11 @@ function rollDice() {
 }
 
 function startMatch() {
-    if (turnTimer) clearTimeout(turnTimer); 
-    turnTimer = null;
+    console.log("!!! STARTING NEW MATCH BLOCK !!!");
+    if (turnTimer) {
+        clearTimeout(turnTimer);
+        turnTimer = null;
+    }
 
     match.status = "preparing";
     match.diceRolls = rollDice();
@@ -66,9 +69,7 @@ function startMatch() {
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
     match.roundReady = [false, false]; 
-    match.animsFinished = [true, true]; // Prevents old turn blocks
-
-    console.log("--- New Round Started ---");
+    match.animsFinished = [true, true]; 
 
     players.forEach((p, index) => {
         const opponentIndex = index === 0 ? 1 : 0;
@@ -153,6 +154,7 @@ function processResults(g1, g2) {
 }
 
 function endRound() {
+    console.log("Round ended. Entering 'round_wait' status.");
     if (turnTimer) clearTimeout(turnTimer);
     
     match.status = "round_wait"; 
@@ -164,10 +166,10 @@ function endRound() {
         currentScores: match.scores
     });
 
-    // Auto-start safety timer
+    // Auto-start safety timer (10 seconds)
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") {
-            console.log("Auto-start triggered.");
+            console.log("AUTO-START: Players took too long to click ready.");
             startMatch();
         }
     }, 10000);
@@ -223,21 +225,32 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // ROUND READY (THE FIX)
+        // ROUND READY
         if (msg.type === "round_ready") {
-            if (match.status !== "round_wait") return; // Ignore if not in wait state
+            console.log(`[READY PACKET] Received from: ${ws.playerId}`);
+            
+            if (match.status !== "round_wait") {
+                console.log(`[REJECTED] Ready ignored. Server status is: ${match.status}`);
+                return;
+            }
 
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1 && !match.roundReady[pIdx]) {
                 match.roundReady[pIdx] = true;
-                console.log(`Player ${pIdx} is Ready.`);
+                console.log(`[STATUS] Player ${pIdx} marked as READY.`);
+                
                 broadcast({ type: "opponent_ready", playerIndex: pIdx });
 
                 if (match.roundReady[0] && match.roundReady[1]) {
-                    console.log("Both ready. Skipping timer.");
+                    console.log("[SUCCESS] Both players ready. Killing 10s timer and starting match.");
                     if (turnTimer) clearTimeout(turnTimer);
+                    turnTimer = null;
                     startMatch(); 
+                } else {
+                    console.log("[WAITING] Still waiting for the other player...");
                 }
+            } else {
+                console.log(`[REJECTED] Player ID not found or already ready. Index: ${pIdx}`);
             }
         }
     });
