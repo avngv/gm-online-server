@@ -24,7 +24,7 @@ let match = {
     playerLoadouts: [[], []], 
     status: "waiting",
     animsFinished: [false, false],
-    roundReady: [false, false] // New: Track skip-waiting for next round
+    roundReady: [false, false] 
 };
 
 // --- UTILITIES ---
@@ -47,28 +47,26 @@ function broadcast(obj) {
 
 // --- GAME LOGIC ---
 function rollDice() {
-    // 1. Create the set [1, 2, 3, 4, 5, 6]
     let set = [1, 2, 3, 4, 5, 6];
-
-    // 2. Shuffle the array (Fisher-Yates Shuffle)
     for (let i = set.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [set[i], set[j]] = [set[j], set[i]];
     }
-
     return set;
 }
 
 function startMatch() {
+    if (turnTimer) clearTimeout(turnTimer); // Clear any pending auto-start timers
+
     match.diceRolls = rollDice();
     match.guesses = [[], []];
     match.currentTurn = 0;
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
-    match.roundReady = [false, false]; // Reset ready status
+    match.roundReady = [false, false]; 
     
     match.status = "preparing";
-    console.log("New set of dice generated.");
+    console.log("Round starting now.");
 
     players.forEach((p, index) => {
         const opponentIndex = index === 0 ? 1 : 0;
@@ -79,7 +77,8 @@ function startMatch() {
         });
     });
     
-    setTimeout(nextTurn, 3000);
+    // Tiny delay so clients can reset their UI before the first turn begins
+    setTimeout(nextTurn, 500);
 }
 
 function nextTurn() {
@@ -149,16 +148,16 @@ function processResults(g1, g2) {
 }
 
 function endRound() {
-    match.status = "round_wait"; // Change status to indicate waiting for next round
+    match.status = "round_wait"; 
     match.roundReady = [false, false];
 
     broadcast({
         type: "new_dice_round",
-        message: "Rolling new dice set...",
+        message: "Round finished. Waiting for players to be ready...",
         currentScores: match.scores
     });
 
-    // Auto-start after 10 seconds if nobody clicks "Ready"
+    // Auto-start safety: if someone goes AFK after a round, start anyway after 10s
     if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") startMatch();
@@ -171,7 +170,6 @@ wss.on("connection", (ws) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
-        // JOIN Logic
         if (msg.type === "join") {
             const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
@@ -195,7 +193,6 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // GUESS Logic
         if (msg.type === "guess" && match.status === "playing") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
@@ -203,7 +200,6 @@ wss.on("connection", (ws) => {
             checkTurnCompletion();
         }
 
-        // ANIMATION DONE Logic
         if (msg.type === "anim_done" && match.status === "results") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
@@ -215,16 +211,18 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // NEW: ROUND READY Logic (Skip Waiting)
+        // --- THE READY CHECK ---
         if (msg.type === "round_ready" && match.status === "round_wait") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
                 match.roundReady[pIdx] = true;
-                console.log(`Player ${pIdx} is ready for the next round.`);
+                
+                // Optional: Let the other player know their opponent is ready
+                broadcast({ type: "opponent_ready", playerIndex: pIdx });
+
                 if (match.roundReady[0] && match.roundReady[1]) {
-                    console.log("Both players ready! Skipping wait.");
-                    if (turnTimer) clearTimeout(turnTimer);
-                    startMatch();
+                    console.log("Both ready! Skipping timer.");
+                    startMatch(); // Starts the next 6 turns immediately
                 }
             }
         }
