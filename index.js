@@ -12,7 +12,7 @@ const MAX_HP = 100;
 // --- DATA DEFINITIONS ---
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
-    "heal": { type: "heal", value: 3 } // FIXED: Renamed from "potion"
+    "heal": { type: "heal", value: 3 }
 };
 
 const server = http.createServer();
@@ -61,7 +61,8 @@ function rollDice() {
     return set;
 }
 
-function startMatch() {
+// --- GAME LOGIC ---
+function startMatch(isFirstJoin = false) {
     if (turnTimer) {
         clearTimeout(turnTimer);
         turnTimer = null;
@@ -75,7 +76,12 @@ function startMatch() {
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
-    match.health = [MAX_HP, MAX_HP];
+
+    // FIX: Only reset health to 100 if it's a brand new lobby or someone is dead
+    if (isFirstJoin || match.health[0] <= 0 || match.health[1] <= 0) {
+        match.health = [MAX_HP, MAX_HP];
+    }
+
     match.currentTurn = 0; 
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
@@ -98,6 +104,12 @@ function startMatch() {
 }
 
 function nextTurn() {
+    // If someone dies mid-round, end the round early
+    if (match.health[0] <= 0 || match.health[1] <= 0) {
+        endRound();
+        return;
+    }
+
     if (match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
@@ -152,7 +164,7 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // P1 Calculation - FIXED to prevent auto-damage
+    // P1 Calculation
     if (p1Success) {
         const item = ITEMS[p1ItemName];
         if (item) {
@@ -169,7 +181,7 @@ function processResults(g1, g2) {
         }
     }
 
-    // P2 Calculation - FIXED to prevent auto-damage
+    // P2 Calculation
     if (p2Success) {
         const item = ITEMS[p2ItemName];
         if (item) {
@@ -186,7 +198,7 @@ function processResults(g1, g2) {
         }
     }
 
-    // Caps: Health cannot drop below 0 or exceed MAX_HP
+    // Apply caps
     match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
     match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
 
@@ -211,6 +223,12 @@ function processResults(g1, g2) {
 
     if (turnTimer) clearTimeout(turnTimer);
 
+    // If someone died, go to endRound immediately
+    if (match.health[0] <= 0 || match.health[1] <= 0) {
+        setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
+        return;
+    }
+
     if (match.currentTurn < TURNS_PER_ROUND) {
         turnTimer = setTimeout(() => { 
             if (match.status === "results") nextTurn(); 
@@ -226,9 +244,11 @@ function endRound() {
     match.status = "round_wait"; 
     match.roundReady = [false, false];
     broadcast({ type: "new_dice_round", health: match.health });
+    
+    // Auto-restart round if players are idle
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") startMatch();
-    }, 10000);
+    }, 15000);
 }
 
 // --- SERVER CORE ---
@@ -255,7 +275,7 @@ wss.on("connection", (ws) => {
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
                 if (players.length === 2) {
                     broadcast({ type: "player_joined" });
-                    startMatch();
+                    startMatch(true); // Reset HP to 100 on initial join
                 }
             }
         }
@@ -273,7 +293,8 @@ wss.on("connection", (ws) => {
                 match.animsFinished[pIdx] = true;
                 if (match.animsFinished[0] && match.animsFinished[1]) {
                     if (turnTimer) clearTimeout(turnTimer);
-                    if (match.currentTurn < TURNS_PER_ROUND) nextTurn();
+                    if (match.health[0] <= 0 || match.health[1] <= 0) endRound();
+                    else if (match.currentTurn < TURNS_PER_ROUND) nextTurn();
                     else endRound();
                 }
             }
@@ -284,7 +305,7 @@ wss.on("connection", (ws) => {
             if (pIdx !== -1 && !match.roundReady[pIdx]) {
                 match.roundReady[pIdx] = true;
                 broadcast({ type: "opponent_ready", playerIndex: pIdx });
-                if (match.roundReady[0] && match.roundReady[1]) startMatch(); 
+                if (match.roundReady[0] && match.roundReady[1]) startMatch(); // Keep HP
             }
         }
     });
@@ -296,4 +317,4 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, "0.0.0.0");
+server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
