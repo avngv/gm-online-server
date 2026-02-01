@@ -4,10 +4,12 @@ const { randomUUID } = require("crypto");
 
 const PORT = process.env.PORT || 8080;
 const TURNS_PER_ROUND = 6;
+const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; 
 const ANIM_SAFETY_TIMEOUT = 15000; 
 const MAX_HP = 100; 
 
+// --- DATA DEFINITIONS ---
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
     "heal": { type: "heal", value: 3 },
@@ -18,6 +20,7 @@ const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
 let players = []; 
+let disconnectedPlayers = {}; 
 let turnTimer = null;
 
 let match = {
@@ -29,6 +32,7 @@ let match = {
     playerLoadouts: [[], []], 
     status: "waiting",
     animsFinished: [false, false],
+    roundReady: [false, false],
     bonusPlayerIndex: -1 
 };
 
@@ -37,6 +41,13 @@ function sendToGM(ws, obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(obj) + "\0");
     }
+}
+
+function safeJSON(data) {
+    try {
+        const str = data.toString().replace(/\0/g, '');
+        return JSON.parse(str);
+    } catch (e) { return null; }
 }
 
 function broadcast(obj) {
@@ -49,25 +60,26 @@ function rollDice() {
         const j = Math.floor(Math.random() * (i + 1));
         [set[i], set[j]] = [set[j], set[i]];
     }
-    console.log("Dice Shuffled for Round:", set);
     return set;
 }
 
-// --- GAME FLOW ---
+// --- GAME LOGIC ---
 function startMatch(isFirstJoin = false) {
     if (turnTimer) clearTimeout(turnTimer);
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
     match.bonusPlayerIndex = -1;
-    match.currentTurn = 0; 
-    
+
     if (isFirstJoin || match.health[0] <= 0 || match.health[1] <= 0) {
         match.health = [MAX_HP, MAX_HP];
     }
 
+    match.currentTurn = 0; 
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
+    match.roundReady = [false, false]; 
+    match.animsFinished = [true, true]; 
 
     players.forEach((p, index) => {
         sendToGM(p.ws, { 
@@ -82,7 +94,7 @@ function startMatch(isFirstJoin = false) {
 }
 
 function nextTurn() {
-    if (players.length < 2) return;
+    if (match.status === "round_wait" || players.length < 2) return;
     match.currentTurn++;
     match.status = "playing";
     match.bonusPlayerIndex = -1;
@@ -102,6 +114,8 @@ function handleAFK() {
             }
         });
         checkTurnCompletion();
+    } else if (match.status === "bonus_move") {
+        proceedAfterAnimation();
     }
 }
 
@@ -123,7 +137,7 @@ function processResults(g1, g2) {
     let p1Dmg = 0, p1Heal = 0, p1Dodged = false;
     let p2Dmg = 0, p2Heal = 0, p2Dodged = false;
 
-    // Resolve Player 1
+    // Player 1 Math
     if (g1.value <= resultDice) {
         const item = ITEMS[p1ItemName];
         if (item.type === "heal") p1Heal = item.value + g1.value;
@@ -131,7 +145,7 @@ function processResults(g1, g2) {
         else if (item.type === "dodge" && g1.value >= g2.value) p1Dodged = true;
     }
 
-    // Resolve Player 2
+    // Player 2 Math
     if (g2.value <= resultDice) {
         const item = ITEMS[p2ItemName];
         if (item.type === "heal") p2Heal = item.value + g2.value;
@@ -139,14 +153,13 @@ function processResults(g1, g2) {
         else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
     }
 
-    // Dodge Mitigation
+    // Set Bonus Attacker
     if (p1Dodged) { p2Dmg = 0; match.bonusPlayerIndex = 0; }
     if (p2Dodged) { p1Dmg = 0; match.bonusPlayerIndex = 1; }
 
     match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0] + p1Heal - p2Dmg)));
     match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1] + p2Heal - p1Dmg)));
 
-    // firstActor logic for GameMaker: -1 = simultaneous, 0 = P1, 1 = P2
     let firstActor = g1.value > g2.value ? 0 : (g2.value > g1.value ? 1 : -1);
 
     broadcast({
@@ -159,33 +172,41 @@ function processResults(g1, g2) {
         hasBonus: match.bonusPlayerIndex
     });
 
+    if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(proceedAfterAnimation, ANIM_SAFETY_TIMEOUT);
 }
 
 function proceedAfterAnimation() {
     if (turnTimer) clearTimeout(turnTimer);
     
+    // Check if we need to do a bonus move before moving to next turn
     if (match.bonusPlayerIndex !== -1 && match.health[0] > 0 && match.health[1] > 0) {
         match.status = "bonus_move";
         broadcast({ type: "bonus_start", playerIndex: match.bonusPlayerIndex });
+        turnTimer = setTimeout(proceedAfterAnimation, TURN_TIME_LIMIT); 
         return;
     }
 
     if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
-        match.status = "round_wait";
-        broadcast({ type: "new_dice_round", health: match.health });
-        setTimeout(startMatch, 5000); 
+        endRound();
     } else {
         nextTurn();
     }
 }
 
+function endRound() {
+    match.status = "round_wait";
+    match.roundReady = [false, false];
+    broadcast({ type: "new_dice_round", health: match.health });
+    if (turnTimer) clearTimeout(turnTimer);
+    turnTimer = setTimeout(() => { if (match.status === "round_wait") startMatch(); }, 15000);
+}
+
 // --- SERVER CORE ---
 wss.on("connection", (ws) => {
     ws.on("message", (data) => {
-        const str = data.toString().replace(/\0/g, '');
-        let msg;
-        try { msg = JSON.parse(str); } catch (e) { return; }
+        const msg = safeJSON(data);
+        if (!msg) return;
 
         if (msg.type === "join") {
             const newId = msg.playerId || randomUUID();
@@ -197,9 +218,7 @@ wss.on("connection", (ws) => {
 
         if (msg.type === "guess") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx === -1) return;
-
-            if (match.status === "playing") {
+            if (match.status === "playing" && pIdx !== -1) {
                 if (match.guesses[pIdx][match.currentTurn - 1] === undefined) {
                     match.guesses[pIdx][match.currentTurn - 1] = { value: msg.value, slot: msg.slot_index };
                     checkTurnCompletion();
@@ -208,24 +227,29 @@ wss.on("connection", (ws) => {
             else if (match.status === "bonus_move" && pIdx === match.bonusPlayerIndex) {
                 const resultDice = match.diceRolls[match.currentTurn - 1];
                 const itemName = match.playerLoadouts[pIdx][msg.slot_index];
-                const success = (msg.value <= resultDice);
-                let dmg = (success && ITEMS[itemName].type === "damage") ? (ITEMS[itemName].value + msg.value) : 0;
+                const item = ITEMS[itemName];
+                let dmg = 0;
+                let success = (msg.value <= resultDice);
 
-                const targetIdx = pIdx === 0 ? 1 : 0;
-                match.health[targetIdx] = Math.max(0, match.health[targetIdx] - dmg);
+                if (success && item.type === "damage") {
+                    dmg = item.value + msg.value;
+                    const targetIdx = pIdx === 0 ? 1 : 0;
+                    match.health[targetIdx] = Math.max(0, match.health[targetIdx] - dmg);
+                }
 
                 broadcast({ 
                     type: "bonus_result", 
                     attackerIndex: pIdx, 
                     itemName: itemName,
                     slot_index: msg.slot_index,
+                    guess: msg.value,
                     success: success,
                     dmg: dmg, 
                     health: match.health 
                 });
 
                 match.bonusPlayerIndex = -1;
-                setTimeout(proceedAfterAnimation, 4000); 
+                setTimeout(proceedAfterAnimation, 3000); 
             }
         }
 
@@ -233,7 +257,18 @@ wss.on("connection", (ws) => {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
                 match.animsFinished[pIdx] = true;
-                if (match.animsFinished[0] && match.animsFinished[1]) proceedAfterAnimation();
+                if (match.animsFinished[0] && match.animsFinished[1]) {
+                    proceedAfterAnimation();
+                }
+            }
+        }
+
+        if (msg.type === "round_ready" && match.status === "round_wait") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1) {
+                match.roundReady[pIdx] = true;
+                broadcast({ type: "opponent_ready", playerIndex: pIdx });
+                if (match.roundReady[0] && match.roundReady[1]) startMatch();
             }
         }
     });
@@ -244,4 +279,4 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Server Online`));
+server.listen(PORT, "0.0.0.0", () => console.log(`Server Online on Port ${PORT}`));
