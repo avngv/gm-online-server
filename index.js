@@ -62,6 +62,11 @@ function startMatch() {
         turnTimer = null;
     }
 
+    if (players.length < 2) {
+        match.status = "waiting";
+        return;
+    }
+
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
@@ -85,10 +90,12 @@ function startMatch() {
 }
 
 function nextTurn() {
+    // If we somehow hit this at turn 6, redirect to endRound
     if (match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
     }
+
     match.currentTurn++;
     match.status = "playing";
     match.animsFinished = [false, false]; 
@@ -148,13 +155,22 @@ function processResults(g1, g2) {
     });
 
     if (turnTimer) clearTimeout(turnTimer);
-    turnTimer = setTimeout(() => { 
-        if (match.status === "results") nextTurn(); 
-    }, ANIM_SAFETY_TIMEOUT);
+
+    // --- TURN 6 FILTER ---
+    if (match.currentTurn < TURNS_PER_ROUND) {
+        // Normal Turn: Wait for animations or safety timeout
+        turnTimer = setTimeout(() => { 
+            if (match.status === "results") nextTurn(); 
+        }, ANIM_SAFETY_TIMEOUT);
+    } else {
+        // TURN 6: Do not set a nextTurn timer. Transition to endRound instead.
+        console.log("Turn 6 results finished. Transitioning to Round Wait.");
+        setTimeout(endRound, 2000); // 2s delay to let clients see the final dice result
+    }
 }
 
 function endRound() {
-    console.log("Round ended. Entering 'round_wait' status.");
+    console.log("Entering 'round_wait' status.");
     if (turnTimer) clearTimeout(turnTimer);
     
     match.status = "round_wait"; 
@@ -169,7 +185,7 @@ function endRound() {
     // Auto-start safety timer (10 seconds)
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") {
-            console.log("AUTO-START: Players took too long to click ready.");
+            console.log("AUTO-START: Players took too long.");
             startMatch();
         }
     }, 10000);
@@ -220,37 +236,35 @@ wss.on("connection", (ws) => {
                 match.animsFinished[pIdx] = true;
                 if (match.animsFinished[0] && match.animsFinished[1]) {
                     if (turnTimer) clearTimeout(turnTimer);
-                    nextTurn();
+                    
+                    // Respect the Turn 6 filter here too
+                    if (match.currentTurn < TURNS_PER_ROUND) {
+                        nextTurn();
+                    } else {
+                        endRound();
+                    }
                 }
             }
         }
 
         // ROUND READY
         if (msg.type === "round_ready") {
-            console.log(`[READY PACKET] Received from: ${ws.playerId}`);
+            console.log(`[READY PACKET] From: ${ws.playerId}. Server status: ${match.status}`);
             
-            if (match.status !== "round_wait") {
-                console.log(`[REJECTED] Ready ignored. Server status is: ${match.status}`);
+            // Safety: Accept ready even if still in 'results' for the last microsecond
+            if (match.status !== "round_wait" && match.status !== "results") {
                 return;
             }
 
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1 && !match.roundReady[pIdx]) {
                 match.roundReady[pIdx] = true;
-                console.log(`[STATUS] Player ${pIdx} marked as READY.`);
-                
                 broadcast({ type: "opponent_ready", playerIndex: pIdx });
 
                 if (match.roundReady[0] && match.roundReady[1]) {
-                    console.log("[SUCCESS] Both players ready. Killing 10s timer and starting match.");
                     if (turnTimer) clearTimeout(turnTimer);
-                    turnTimer = null;
                     startMatch(); 
-                } else {
-                    console.log("[WAITING] Still waiting for the other player...");
                 }
-            } else {
-                console.log(`[REJECTED] Player ID not found or already ready. Index: ${pIdx}`);
             }
         }
     });
