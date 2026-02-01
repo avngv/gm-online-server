@@ -12,7 +12,8 @@ const MAX_HP = 100;
 // --- DATA DEFINITIONS ---
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
-    "heal": { type: "heal", value: 3 }
+    "heal": { type: "heal", value: 3 },
+    "dodge": { type: "dodge", value: 0 } // NEW ITEM
 };
 
 const server = http.createServer();
@@ -77,7 +78,6 @@ function startMatch(isFirstJoin = false) {
     match.diceRolls = rollDice();
     match.guesses = [[], []];
 
-    // FIX: Only reset health to 100 if it's a brand new lobby or someone is dead
     if (isFirstJoin || match.health[0] <= 0 || match.health[1] <= 0) {
         match.health = [MAX_HP, MAX_HP];
     }
@@ -104,13 +104,7 @@ function startMatch(isFirstJoin = false) {
 }
 
 function nextTurn() {
-    // If someone dies mid-round, end the round early
-    if (match.health[0] <= 0 || match.health[1] <= 0) {
-        endRound();
-        return;
-    }
-
-    if (match.currentTurn >= TURNS_PER_ROUND) {
+    if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
     }
@@ -158,47 +152,43 @@ function processResults(g1, g2) {
     const p1Success = g1.value <= resultDice;
     const p2Success = g2.value <= resultDice;
 
-    let p1Dmg = 0; let p1Heal = 0;
-    let p2Dmg = 0; let p2Heal = 0;
-
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // P1 Calculation
+    let p1Dmg = 0; let p1Heal = 0; let p1Dodged = false;
+    let p2Dmg = 0; let p2Heal = 0; let p2Dodged = false;
+
+    // 1. Calculate Intentions (What do they want to do?)
     if (p1Success) {
         const item = ITEMS[p1ItemName];
         if (item) {
             let total = item.value + g1.value;
             if (resultDice === 6) total = Math.floor(total * 1.5);
-            
-            if (item.type === "heal") {
-                p1Heal = total;
-                match.health[0] += p1Heal;
-            } else if (item.type === "damage") {
-                p1Dmg = total;
-                match.health[1] -= p1Dmg;
-            }
+            if (item.type === "heal") p1Heal = total;
+            else if (item.type === "damage") p1Dmg = total;
+            else if (item.type === "dodge" && g1.value >= g2.value) p1Dodged = true;
         }
     }
 
-    // P2 Calculation
     if (p2Success) {
         const item = ITEMS[p2ItemName];
         if (item) {
             let total = item.value + g2.value;
             if (resultDice === 6) total = Math.floor(total * 1.5);
-
-            if (item.type === "heal") {
-                p2Heal = total;
-                match.health[1] += p2Heal;
-            } else if (item.type === "damage") {
-                p2Dmg = total;
-                match.health[0] -= p2Dmg;
-            }
+            if (item.type === "heal") p2Heal = total;
+            else if (item.type === "damage") p2Dmg = total;
+            else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
         }
     }
 
-    // Apply caps
+    // 2. Apply Dodge (Cancel damage if dodge worked)
+    if (p1Dodged) p2Dmg = 0;
+    if (p2Dodged) p1Dmg = 0;
+
+    // 3. Update State
+    match.health[0] += p1Heal - p2Dmg;
+    match.health[1] += p2Heal - p1Dmg;
+
     match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
     match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
 
@@ -210,29 +200,15 @@ function processResults(g1, g2) {
         type: "turn_result",
         dice: resultDice,
         health: match.health,
-        p1: { 
-            slot: g1.slot, itemName: p1ItemName, guess: g1.value, 
-            success: p1Success, dmg: p1Dmg, heal: p1Heal 
-        },
-        p2: { 
-            slot: g2.slot, itemName: p2ItemName, guess: g2.value, 
-            success: p2Success, dmg: p2Dmg, heal: p2Heal 
-        },
+        p1: { slot: g1.slot, itemName: p1ItemName, guess: g1.value, success: p1Success, dmg: p1Dmg, heal: p1Heal, dodged: p1Dodged },
+        p2: { slot: g2.slot, itemName: p2ItemName, guess: g2.value, success: p2Success, dmg: p2Dmg, heal: p2Heal, dodged: p2Dodged },
         firstActor: firstActor
     });
 
-    if (turnTimer) clearTimeout(turnTimer);
-
-    // If someone died, go to endRound immediately
     if (match.health[0] <= 0 || match.health[1] <= 0) {
         setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
-        return;
-    }
-
-    if (match.currentTurn < TURNS_PER_ROUND) {
-        turnTimer = setTimeout(() => { 
-            if (match.status === "results") nextTurn(); 
-        }, ANIM_SAFETY_TIMEOUT);
+    } else if (match.currentTurn < TURNS_PER_ROUND) {
+        turnTimer = setTimeout(() => { if (match.status === "results") nextTurn(); }, ANIM_SAFETY_TIMEOUT);
     } else {
         setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
     }
@@ -244,14 +220,10 @@ function endRound() {
     match.status = "round_wait"; 
     match.roundReady = [false, false];
     broadcast({ type: "new_dice_round", health: match.health });
-    
-    // Auto-restart round if players are idle
-    turnTimer = setTimeout(() => {
-        if (match.status === "round_wait") startMatch();
-    }, 15000);
+    turnTimer = setTimeout(() => { if (match.status === "round_wait") startMatch(); }, 15000);
 }
 
-// --- SERVER CORE ---
+// --- SERVER CORE (UNCHANGED) ---
 wss.on("connection", (ws) => {
     ws.on("message", (data) => {
         const msg = safeJSON(data);
@@ -275,7 +247,7 @@ wss.on("connection", (ws) => {
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
                 if (players.length === 2) {
                     broadcast({ type: "player_joined" });
-                    startMatch(true); // Reset HP to 100 on initial join
+                    startMatch(true);
                 }
             }
         }
@@ -305,7 +277,7 @@ wss.on("connection", (ws) => {
             if (pIdx !== -1 && !match.roundReady[pIdx]) {
                 match.roundReady[pIdx] = true;
                 broadcast({ type: "opponent_ready", playerIndex: pIdx });
-                if (match.roundReady[0] && match.roundReady[1]) startMatch(); // Keep HP
+                if (match.roundReady[0] && match.roundReady[1]) startMatch();
             }
         }
     });
