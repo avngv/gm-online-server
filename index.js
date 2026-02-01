@@ -7,12 +7,12 @@ const TURNS_PER_ROUND = 6;
 const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; 
 const ANIM_SAFETY_TIMEOUT = 15000; 
-const MAX_HP = 100; // Added constant for health cap
+const MAX_HP = 100; 
 
 // --- DATA DEFINITIONS ---
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
-    "potion": { type: "heal", value: 3 }
+    "heal": { type: "heal", value: 3 } // FIXED: Renamed from "potion"
 };
 
 const server = http.createServer();
@@ -52,7 +52,6 @@ function broadcast(obj) {
     players.forEach(p => sendToGM(p.ws, obj));
 }
 
-// --- GAME LOGIC ---
 function rollDice() {
     let set = [1, 2, 3, 4, 5, 6];
     for (let i = set.length - 1; i > 0; i--) {
@@ -153,39 +152,43 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // P1 Calculation
+    // P1 Calculation - FIXED to prevent auto-damage
     if (p1Success) {
         const item = ITEMS[p1ItemName];
-        let total = (item ? item.value : 0) + g1.value;
-        if (resultDice === 6) total = Math.floor(total * 1.5);
-        
-        if (item && item.type === "heal") {
-            p1Heal = total;
-            match.health[0] += p1Heal;
-        } else {
-            p1Dmg = total;
-            match.health[1] -= p1Dmg;
+        if (item) {
+            let total = item.value + g1.value;
+            if (resultDice === 6) total = Math.floor(total * 1.5);
+            
+            if (item.type === "heal") {
+                p1Heal = total;
+                match.health[0] += p1Heal;
+            } else if (item.type === "damage") {
+                p1Dmg = total;
+                match.health[1] -= p1Dmg;
+            }
         }
     }
 
-    // P2 Calculation
+    // P2 Calculation - FIXED to prevent auto-damage
     if (p2Success) {
         const item = ITEMS[p2ItemName];
-        let total = (item ? item.value : 0) + g2.value;
-        if (resultDice === 6) total = Math.floor(total * 1.5);
+        if (item) {
+            let total = item.value + g2.value;
+            if (resultDice === 6) total = Math.floor(total * 1.5);
 
-        if (item && item.type === "heal") {
-            p2Heal = total;
-            match.health[1] += p2Heal;
-        } else {
-            p2Dmg = total;
-            match.health[0] -= p2Dmg;
+            if (item.type === "heal") {
+                p2Heal = total;
+                match.health[1] += p2Heal;
+            } else if (item.type === "damage") {
+                p2Dmg = total;
+                match.health[0] -= p2Dmg;
+            }
         }
     }
 
     // Caps: Health cannot drop below 0 or exceed MAX_HP
-    match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0]));
-    match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1]));
+    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
+    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
 
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
