@@ -8,10 +8,9 @@ const TURN_TIME_LIMIT = 10000;
 const ANIM_SAFETY_TIMEOUT = 15000; 
 const MAX_HP = 100;
 
-// --- DATA DEFINITIONS ---
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
-    "heal": { type: "heal", value: 3 } // Updated to match your client
+    "heal": { type: "heal", value: 3 }
 };
 
 const server = http.createServer();
@@ -32,7 +31,6 @@ let match = {
     roundReady: [false, false] 
 };
 
-// --- UTILITIES ---
 function sendToGM(ws, obj) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(obj) + "\0");
@@ -59,7 +57,6 @@ function rollDice() {
     return set;
 }
 
-// --- GAME LOGIC ---
 function startMatch(isFirstBattleStart = false) {
     if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
     if (players.length < 2) { match.status = "waiting"; return; }
@@ -78,13 +75,10 @@ function startMatch(isFirstBattleStart = false) {
     match.animsFinished = [true, true]; 
 
     players.forEach((p, index) => {
-        const opponentIndex = index === 0 ? 1 : 0;
-        const opponent = players[opponentIndex];
         sendToGM(p.ws, { 
             type: "game_prepare", 
             yourIndex: index, 
-            health: match.health,
-            opponentSlotCount: opponent ? opponent.equipments.length : 0 
+            health: match.health 
         });
     });
     
@@ -147,7 +141,7 @@ function processResults(g1, g2) {
         if (item && item.type === "heal") {
             p1Heal = total;
             match.health[0] += p1Heal;
-        } else {
+        } else if (item && item.type === "damage") {
             p1Dmg = total;
             match.health[1] -= p1Dmg;
         }
@@ -161,7 +155,7 @@ function processResults(g1, g2) {
         if (item && item.type === "heal") {
             p2Heal = total;
             match.health[1] += p2Heal;
-        } else {
+        } else if (item && item.type === "damage") {
             p2Dmg = total;
             match.health[0] -= p2Dmg;
         }
