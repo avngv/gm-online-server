@@ -8,6 +8,11 @@ const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; 
 const ANIM_SAFETY_TIMEOUT = 15000; 
 
+// --- DATA DEFINITIONS ---
+const WEAPONS = {
+    "sword": { base_dmg: 3 }
+};
+
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
@@ -18,7 +23,7 @@ let turnTimer = null;
 let match = {
     diceRolls: [],
     guesses: [[], []],
-    health: [100, 100], // Tracking health for both players
+    health: [100, 100],
     currentTurn: 0,
     playerIds: [],
     playerLoadouts: [[], []], 
@@ -69,7 +74,7 @@ function startMatch() {
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
-    match.health = [100, 100]; // Initialize health to 100
+    match.health = [100, 100];
     match.currentTurn = 0; 
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
@@ -83,7 +88,7 @@ function startMatch() {
             type: "game_prepare", 
             yourIndex: index, 
             turn: 0,
-            health: match.health, // Broadcast initial health
+            health: match.health,
             opponentSlotCount: opponent ? opponent.equipments.length : 0 
         });
     });
@@ -104,7 +109,7 @@ function nextTurn() {
     broadcast({ 
         type: "turn_start", 
         turn: match.currentTurn,
-        health: match.health // Keep client updated on current health
+        health: match.health 
     });
 
     if (turnTimer) clearTimeout(turnTimer);
@@ -140,6 +145,30 @@ function processResults(g1, g2) {
     const p1Success = g1.value <= resultDice;
     const p2Success = g2.value <= resultDice;
 
+    // --- NEW DAMAGE CALCULATION ---
+    let p1Dmg = 0;
+    let p2Dmg = 0;
+
+    if (p1Success) {
+        const p1ItemName = match.playerLoadouts[0][g1.slot];
+        const weapon = WEAPONS[p1ItemName];
+        const base = weapon ? weapon.base_dmg : 0;
+        p1Dmg = base + g1.value;
+        match.health[1] -= p1Dmg;
+    }
+
+    if (p2Success) {
+        const p2ItemName = match.playerLoadouts[1][g2.slot];
+        const weapon = WEAPONS[p2ItemName];
+        const base = weapon ? weapon.base_dmg : 0;
+        p2Dmg = base + g2.value;
+        match.health[0] -= p2Dmg;
+    }
+
+    // Clamp health to 0
+    match.health[0] = Math.max(0, match.health[0]);
+    match.health[1] = Math.max(0, match.health[1]);
+
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
     else if (g2.value > g1.value) firstActor = 1;
@@ -147,9 +176,9 @@ function processResults(g1, g2) {
     broadcast({
         type: "turn_result",
         dice: resultDice,
-        health: match.health, // Broadcasting current health state
-        p1: { slot: g1.slot, guess: g1.value, success: p1Success },
-        p2: { slot: g2.slot, guess: g2.value, success: p2Success },
+        health: match.health,
+        p1: { slot: g1.slot, guess: g1.value, success: p1Success, dmg: p1Dmg },
+        p2: { slot: g2.slot, guess: g2.value, success: p2Success, dmg: p2Dmg },
         firstActor: firstActor
     });
 
@@ -166,15 +195,11 @@ function processResults(g1, g2) {
 
 function endRound() {
     if (match.status === "round_wait") return;
-
     if (turnTimer) clearTimeout(turnTimer);
     match.status = "round_wait"; 
     match.roundReady = [false, false];
 
-    broadcast({
-        type: "new_dice_round",
-        health: match.health // Final health state for the round
-    });
+    broadcast({ type: "new_dice_round", health: match.health });
 
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") startMatch();
