@@ -13,7 +13,7 @@ const MAX_HP = 100;
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
     "heal": { type: "heal", value: 3 },
-    "dodge": { type: "dodge", value: 0 } // NEW ITEM
+    "dodge": { type: "dodge", value: 0 }
 };
 
 const server = http.createServer();
@@ -32,7 +32,8 @@ let match = {
     playerLoadouts: [[], []], 
     status: "waiting",
     animsFinished: [false, false],
-    roundReady: [false, false] 
+    roundReady: [false, false],
+    bonusPlayerIndex: -1 
 };
 
 // --- UTILITIES ---
@@ -64,19 +65,11 @@ function rollDice() {
 
 // --- GAME LOGIC ---
 function startMatch(isFirstJoin = false) {
-    if (turnTimer) {
-        clearTimeout(turnTimer);
-        turnTimer = null;
-    }
-
-    if (players.length < 2) {
-        match.status = "waiting";
-        return;
-    }
-
+    if (turnTimer) clearTimeout(turnTimer);
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
+    match.bonusPlayerIndex = -1;
 
     if (isFirstJoin || match.health[0] <= 0 || match.health[1] <= 0) {
         match.health = [MAX_HP, MAX_HP];
@@ -89,51 +82,41 @@ function startMatch(isFirstJoin = false) {
     match.animsFinished = [true, true]; 
 
     players.forEach((p, index) => {
-        const opponentIndex = index === 0 ? 1 : 0;
-        const opponent = players[opponentIndex];
         sendToGM(p.ws, { 
             type: "game_prepare", 
             yourIndex: index, 
-            turn: 0,
             health: match.health,
-            opponentSlotCount: opponent ? opponent.equipments.length : 0 
+            opponentSlotCount: players[index === 0 ? 1 : 0]?.equipments.length || 0
         });
     });
     
-    setTimeout(nextTurn, 500);
+    setTimeout(nextTurn, 1000);
 }
 
 function nextTurn() {
-    if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
-        endRound();
-        return;
-    }
-
+    if (match.status === "round_wait" || players.length < 2) return;
     match.currentTurn++;
     match.status = "playing";
+    match.bonusPlayerIndex = -1;
     match.animsFinished = [false, false]; 
     
-    broadcast({ 
-        type: "turn_start", 
-        turn: match.currentTurn,
-        health: match.health 
-    });
+    broadcast({ type: "turn_start", turn: match.currentTurn, health: match.health });
 
     if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(handleAFK, TURN_TIME_LIMIT);
 }
 
 function handleAFK() {
-    if (match.status !== "playing") return;
-    players.forEach((p, i) => {
-        if (match.guesses[i][match.currentTurn - 1] === undefined) {
-            const loadout = match.playerLoadouts[i];
-            const randomSlot = Math.floor(Math.random() * loadout.length);
-            const randomDice = Math.floor(Math.random() * 6) + 1;
-            match.guesses[i][match.currentTurn - 1] = { value: randomDice, slot: randomSlot };
-        }
-    });
-    checkTurnCompletion();
+    if (match.status === "playing") {
+        players.forEach((p, i) => {
+            if (match.guesses[i][match.currentTurn - 1] === undefined) {
+                match.guesses[i][match.currentTurn - 1] = { value: 1, slot: 0 };
+            }
+        });
+        checkTurnCompletion();
+    } else if (match.status === "bonus_move") {
+        proceedAfterAnimation();
+    }
 }
 
 function checkTurnCompletion() {
@@ -148,133 +131,154 @@ function checkTurnCompletion() {
 function processResults(g1, g2) {
     match.status = "results";
     const resultDice = match.diceRolls[match.currentTurn - 1];
-    
-    const p1Success = g1.value <= resultDice;
-    const p2Success = g2.value <= resultDice;
-
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    let p1Dmg = 0; let p1Heal = 0; let p1Dodged = false;
-    let p2Dmg = 0; let p2Heal = 0; let p2Dodged = false;
+    let p1Dmg = 0, p1Heal = 0, p1Dodged = false;
+    let p2Dmg = 0, p2Heal = 0, p2Dodged = false;
 
-    // 1. Calculate Intentions (What do they want to do?)
-    if (p1Success) {
+    // Calculate P1
+    if (g1.value <= resultDice) {
         const item = ITEMS[p1ItemName];
-        if (item) {
-            let total = item.value + g1.value;
-            if (resultDice === 6) total = Math.floor(total * 1.5);
-            if (item.type === "heal") p1Heal = total;
-            else if (item.type === "damage") p1Dmg = total;
-            else if (item.type === "dodge" && g1.value >= g2.value) p1Dodged = true;
-        }
+        if (item.type === "heal") p1Heal = item.value + g1.value;
+        else if (item.type === "damage") p1Dmg = item.value + g1.value;
+        else if (item.type === "dodge" && g1.value >= g2.value) p1Dodged = true;
     }
 
-    if (p2Success) {
+    // Calculate P2
+    if (g2.value <= resultDice) {
         const item = ITEMS[p2ItemName];
-        if (item) {
-            let total = item.value + g2.value;
-            if (resultDice === 6) total = Math.floor(total * 1.5);
-            if (item.type === "heal") p2Heal = total;
-            else if (item.type === "damage") p2Dmg = total;
-            else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
-        }
+        if (item.type === "heal") p2Heal = item.value + g2.value;
+        else if (item.type === "damage") p2Dmg = item.value + g2.value;
+        else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
     }
 
-    // 2. Apply Dodge (Cancel damage if dodge worked)
-    if (p1Dodged) p2Dmg = 0;
-    if (p2Dodged) p1Dmg = 0;
+    // Apply Dodge Mitigation
+    if (p1Dodged) { p2Dmg = 0; match.bonusPlayerIndex = 0; }
+    if (p2Dodged) { p1Dmg = 0; match.bonusPlayerIndex = 1; }
 
-    // 3. Update State
-    match.health[0] += p1Heal - p2Dmg;
-    match.health[1] += p2Heal - p1Dmg;
+    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0] + p1Heal - p2Dmg)));
+    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1] + p2Heal - p1Dmg)));
 
-    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
-    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
-
-    let firstActor = -1;
-    if (g1.value > g2.value) firstActor = 0;
-    else if (g2.value > g1.value) firstActor = 1;
+    let firstActor = g1.value > g2.value ? 0 : (g2.value > g1.value ? 1 : -1);
 
     broadcast({
         type: "turn_result",
         dice: resultDice,
         health: match.health,
-        p1: { slot: g1.slot, itemName: p1ItemName, guess: g1.value, success: p1Success, dmg: p1Dmg, heal: p1Heal, dodged: p1Dodged },
-        p2: { slot: g2.slot, itemName: p2ItemName, guess: g2.value, success: p2Success, dmg: p2Dmg, heal: p2Heal, dodged: p2Dodged },
-        firstActor: firstActor
+        p1: { itemName: p1ItemName, slot: g1.slot, guess: g1.value, success: g1.value <= resultDice, dmg: p1Dmg, heal: p1Heal, dodged: p1Dodged },
+        p2: { itemName: p2ItemName, slot: g2.slot, guess: g2.value, success: g2.value <= resultDice, dmg: p2Dmg, heal: p2Heal, dodged: p2Dodged },
+        firstActor: firstActor,
+        hasBonus: match.bonusPlayerIndex
     });
 
-    if (match.health[0] <= 0 || match.health[1] <= 0) {
-        setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
-    } else if (match.currentTurn < TURNS_PER_ROUND) {
-        turnTimer = setTimeout(() => { if (match.status === "results") nextTurn(); }, ANIM_SAFETY_TIMEOUT);
+    // We don't call proceedAfterAnimation directly here. 
+    // We wait for anim_done.
+}
+
+function proceedAfterAnimation() {
+    if (turnTimer) clearTimeout(turnTimer);
+    
+    // PRIORITY 1: Handle Bonus Move if someone dodged
+    if (match.bonusPlayerIndex !== -1 && match.health[0] > 0 && match.health[1] > 0) {
+        match.status = "bonus_move";
+        broadcast({ type: "bonus_start", playerIndex: match.bonusPlayerIndex });
+        
+        // Reset anim flags for the next phase
+        match.animsFinished = [false, false];
+        
+        // Bonus move timeout
+        turnTimer = setTimeout(proceedAfterAnimation, TURN_TIME_LIMIT); 
+        return;
+    }
+
+    // PRIORITY 2: Check for Match End
+    if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
+        endRound();
     } else {
-        setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
+        // PRIORITY 3: Normal Next Turn
+        nextTurn();
     }
 }
 
 function endRound() {
-    if (match.status === "round_wait") return;
-    if (turnTimer) clearTimeout(turnTimer);
-    match.status = "round_wait"; 
+    match.status = "round_wait";
     match.roundReady = [false, false];
     broadcast({ type: "new_dice_round", health: match.health });
+    if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(() => { if (match.status === "round_wait") startMatch(); }, 15000);
 }
 
-// --- SERVER CORE (UNCHANGED) ---
+// --- SERVER CORE ---
 wss.on("connection", (ws) => {
     ws.on("message", (data) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
         if (msg.type === "join") {
-            const existingId = msg.playerId;
-            const clientEquips = msg.equipments || [];
-            if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
-                clearTimeout(disconnectedPlayers[existingId]);
-                delete disconnectedPlayers[existingId];
-                ws.playerId = existingId;
-                players.push({ ws, playerId: existingId, equipments: clientEquips });
-                sendToGM(ws, { type: "reconnect", matchState: match });
-                return;
-            }
-            if (players.length < 2) {
-                const newId = randomUUID();
-                ws.playerId = newId;
-                players.push({ ws, playerId: newId, equipments: clientEquips });
-                sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
-                if (players.length === 2) {
-                    broadcast({ type: "player_joined" });
-                    startMatch(true);
-                }
-            }
+            const newId = msg.playerId || randomUUID();
+            ws.playerId = newId;
+            players.push({ ws, playerId: newId, equipments: msg.equipments || [] });
+            sendToGM(ws, { type: "assign_id", playerId: newId, equipments: msg.equipments });
+            if (players.length === 2) startMatch(true);
         }
 
-        if (msg.type === "guess" && match.status === "playing") {
+        if (msg.type === "guess") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
-            match.guesses[pIdx][match.currentTurn - 1] = { value: msg.value, slot: msg.slot_index };
-            checkTurnCompletion();
+            if (pIdx === -1) return;
+
+            if (match.status === "playing") {
+                if (match.guesses[pIdx][match.currentTurn - 1] === undefined) {
+                    match.guesses[pIdx][match.currentTurn - 1] = { value: msg.value, slot: msg.slot_index };
+                    checkTurnCompletion();
+                }
+            } 
+            else if (match.status === "bonus_move" && pIdx === match.bonusPlayerIndex) {
+                const resultDice = match.diceRolls[match.currentTurn - 1];
+                const itemName = match.playerLoadouts[pIdx][msg.slot_index];
+                const item = ITEMS[itemName];
+                let dmg = 0;
+                let success = (msg.value <= resultDice);
+
+                if (success && item && item.type === "damage") {
+                    dmg = item.value + msg.value;
+                    const targetIdx = pIdx === 0 ? 1 : 0;
+                    match.health[targetIdx] = Math.max(0, match.health[targetIdx] - dmg);
+                }
+
+                broadcast({ 
+                    type: "bonus_result", 
+                    attackerIndex: pIdx, 
+                    itemName: itemName,
+                    slot_index: msg.slot_index,
+                    guess: msg.value,
+                    success: success,
+                    dmg: dmg, 
+                    health: match.health 
+                });
+
+                // Crucial: Clear the bonus index so proceedAfterAnimation moves to the next turn
+                match.bonusPlayerIndex = -1; 
+                
+                // Give time for the bonus animation
+                setTimeout(proceedAfterAnimation, 3000); 
+            }
         }
 
-        if (msg.type === "anim_done" && match.status === "results") {
+        if (msg.type === "anim_done") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
                 match.animsFinished[pIdx] = true;
-                if (match.animsFinished[0] && match.animsFinished[1]) {
-                    if (turnTimer) clearTimeout(turnTimer);
-                    if (match.health[0] <= 0 || match.health[1] <= 0) endRound();
-                    else if (match.currentTurn < TURNS_PER_ROUND) nextTurn();
-                    else endRound();
+                // Only proceed if both are done AND we aren't already waiting for a bonus move input
+                if (match.animsFinished[0] && match.animsFinished[1] && match.status === "results") {
+                    proceedAfterAnimation();
                 }
             }
         }
 
         if (msg.type === "round_ready" && match.status === "round_wait") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx !== -1 && !match.roundReady[pIdx]) {
+            if (pIdx !== -1) {
                 match.roundReady[pIdx] = true;
                 broadcast({ type: "opponent_ready", playerIndex: pIdx });
                 if (match.roundReady[0] && match.roundReady[1]) startMatch();
@@ -283,10 +287,9 @@ wss.on("connection", (ws) => {
     });
 
     ws.on("close", () => {
-        const playerId = ws.playerId;
-        players = players.filter(p => p.playerId !== playerId);
-        disconnectedPlayers[playerId] = setTimeout(() => delete disconnectedPlayers[playerId], RECONNECT_TIMEOUT);
+        players = players.filter(p => p.ws !== ws);
+        match.status = "waiting";
     });
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, "0.0.0.0", () => console.log(`Server Online`));
