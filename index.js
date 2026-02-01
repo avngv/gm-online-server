@@ -7,10 +7,12 @@ const TURNS_PER_ROUND = 6;
 const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; 
 const ANIM_SAFETY_TIMEOUT = 15000; 
+const MAX_HP = 100; // Added constant for health cap
 
 // --- DATA DEFINITIONS ---
-const WEAPONS = {
-    "sword": { base_dmg: 3 }
+const ITEMS = {
+    "sword": { type: "damage", value: 3 },
+    "potion": { type: "heal", value: 3 }
 };
 
 const server = http.createServer();
@@ -23,7 +25,7 @@ let turnTimer = null;
 let match = {
     diceRolls: [],
     guesses: [[], []],
-    health: [100, 100],
+    health: [MAX_HP, MAX_HP],
     currentTurn: 0,
     playerIds: [],
     playerLoadouts: [[], []], 
@@ -74,7 +76,7 @@ function startMatch() {
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
-    match.health = [100, 100];
+    match.health = [MAX_HP, MAX_HP];
     match.currentTurn = 0; 
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
@@ -145,29 +147,45 @@ function processResults(g1, g2) {
     const p1Success = g1.value <= resultDice;
     const p2Success = g2.value <= resultDice;
 
-    let p1Dmg = 0;
-    let p2Dmg = 0;
+    let p1Dmg = 0; let p1Heal = 0;
+    let p2Dmg = 0; let p2Heal = 0;
 
-    // Get item names for dmg calculation and broadcasting
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
+    // P1 Calculation
     if (p1Success) {
-        const weapon = WEAPONS[p1ItemName];
-        const base = weapon ? weapon.base_dmg : 0;
-        p1Dmg = base + g1.value;
-        match.health[1] -= p1Dmg;
+        const item = ITEMS[p1ItemName];
+        let total = (item ? item.value : 0) + g1.value;
+        if (resultDice === 6) total = Math.floor(total * 1.5);
+        
+        if (item && item.type === "heal") {
+            p1Heal = total;
+            match.health[0] += p1Heal;
+        } else {
+            p1Dmg = total;
+            match.health[1] -= p1Dmg;
+        }
     }
 
+    // P2 Calculation
     if (p2Success) {
-        const weapon = WEAPONS[p2ItemName];
-        const base = weapon ? weapon.base_dmg : 0;
-        p2Dmg = base + g2.value;
-        match.health[0] -= p2Dmg;
+        const item = ITEMS[p2ItemName];
+        let total = (item ? item.value : 0) + g2.value;
+        if (resultDice === 6) total = Math.floor(total * 1.5);
+
+        if (item && item.type === "heal") {
+            p2Heal = total;
+            match.health[1] += p2Heal;
+        } else {
+            p2Dmg = total;
+            match.health[0] -= p2Dmg;
+        }
     }
 
-    match.health[0] = Math.max(0, match.health[0]);
-    match.health[1] = Math.max(0, match.health[1]);
+    // Caps: Health cannot drop below 0 or exceed MAX_HP
+    match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0]));
+    match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1]));
 
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
@@ -178,18 +196,12 @@ function processResults(g1, g2) {
         dice: resultDice,
         health: match.health,
         p1: { 
-            slot: g1.slot, 
-            itemName: p1ItemName, // RE-ADDED
-            guess: g1.value, 
-            success: p1Success, 
-            dmg: p1Dmg 
+            slot: g1.slot, itemName: p1ItemName, guess: g1.value, 
+            success: p1Success, dmg: p1Dmg, heal: p1Heal 
         },
         p2: { 
-            slot: g2.slot, 
-            itemName: p2ItemName, // RE-ADDED
-            guess: g2.value, 
-            success: p2Success, 
-            dmg: p2Dmg 
+            slot: g2.slot, itemName: p2ItemName, guess: g2.value, 
+            success: p2Success, dmg: p2Dmg, heal: p2Heal 
         },
         firstActor: firstActor
     });
