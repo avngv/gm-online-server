@@ -4,12 +4,13 @@ const { randomUUID } = require("crypto");
 
 const PORT = process.env.PORT || 8080;
 const TURNS_PER_ROUND = 6;
-const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; 
 const ANIM_SAFETY_TIMEOUT = 15000; 
 const MAX_HP = 100;
 
 // --- DATA DEFINITIONS ---
+// Only items in this list will affect HP. 
+// Any other item name sent by the client will be treated as "Utility" (0 HP change).
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
     "potion": { type: "heal", value: 3 }
@@ -19,7 +20,6 @@ const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
 let players = []; 
-let disconnectedPlayers = {}; 
 let turnTimer = null;
 
 let match = {
@@ -73,7 +73,7 @@ function startMatch(isFirstBattleStart = false) {
         return;
     }
 
-    // Persistent Health Logic: Only reset to 100 at the very start of a fight
+    // Health Persists across Dice Rounds unless it's a brand new game
     if (isFirstBattleStart) {
         match.health = [MAX_HP, MAX_HP];
     }
@@ -162,54 +162,52 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // Calculate Player 1
+    // --- Player 1 Logic ---
     if (p1Success) {
-        const item = ITEMS[p1ItemName] || { type: "damage", value: 0 }; // Fallback to 0 if item missing
-        let total = (item.value || 0) + g1.value;
-        if (resultDice === 6) total = Math.floor(total * 1.5);
-        
-        if (item.type === "heal") {
-            p1Heal = total;
-            match.health[0] += p1Heal;
-        } else {
-            p1Dmg = total;
-            match.health[1] -= p1Dmg;
+        const item = ITEMS[p1ItemName];
+        if (item) {
+            let total = item.value + g1.value;
+            if (resultDice === 6) total = Math.floor(total * 1.5);
+            
+            if (item.type === "heal") {
+                p1Heal = total;
+                match.health[0] += p1Heal;
+            } else if (item.type === "damage") {
+                p1Dmg = total;
+                match.health[1] -= p1Dmg;
+            }
         }
     }
 
-    // Calculate Player 2
+    // --- Player 2 Logic ---
     if (p2Success) {
-        const item = ITEMS[p2ItemName] || { type: "damage", value: 0 };
-        let total = (item.value || 0) + g2.value;
-        if (resultDice === 6) total = Math.floor(total * 1.5);
+        const item = ITEMS[p2ItemName];
+        if (item) {
+            let total = item.value + g2.value;
+            if (resultDice === 6) total = Math.floor(total * 1.5);
 
-        if (item.type === "heal") {
-            p2Heal = total;
-            match.health[1] += p2Heal;
-        } else {
-            p2Dmg = total;
-            match.health[0] -= p2Dmg;
+            if (item.type === "heal") {
+                p2Heal = total;
+                match.health[1] += p2Heal;
+            } else if (item.type === "damage") {
+                p2Dmg = total;
+                match.health[0] -= p2Dmg;
+            }
         }
     }
 
-    // Clamp health between 0 and 100
+    // --- Final HP Clamp & Clean up ---
     match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
     match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
 
-    console.log(`Round Result: HP [${match.health[0]}, ${match.health[1]}]`);
+    console.log(`TURN ${match.currentTurn} | Dice: ${resultDice} | HP: [${match.health[0]}, ${match.health[1]}]`);
 
     broadcast({
         type: "turn_result",
         dice: resultDice,
         health: match.health,
-        p1: { 
-            slot: g1.slot, itemName: p1ItemName, guess: g1.value, 
-            success: p1Success, dmg: p1Dmg, heal: p1Heal 
-        },
-        p2: { 
-            slot: g2.slot, itemName: p2ItemName, guess: g2.value, 
-            success: p2Success, dmg: p2Dmg, heal: p2Heal 
-        },
+        p1: { slot: g1.slot, itemName: p1ItemName, guess: g1.value, success: p1Success, dmg: p1Dmg, heal: p1Heal },
+        p2: { slot: g2.slot, itemName: p2ItemName, guess: g2.value, success: p2Success, dmg: p2Dmg, heal: p2Heal },
         firstActor: (g1.value > g2.value) ? 0 : (g2.value > g1.value ? 1 : -1)
     });
 
@@ -255,7 +253,7 @@ wss.on("connection", (ws) => {
             
             if (players.length === 2) {
                 broadcast({ type: "player_joined" });
-                startMatch(true); // Initial start resets health
+                startMatch(true);
             }
         }
 
