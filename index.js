@@ -103,12 +103,7 @@ function startMatch(isFirstJoin = false) {
 }
 
 function nextTurn() {
-    if (match.health[0] <= 0 || match.health[1] <= 0) {
-        endRound();
-        return;
-    }
-
-    if (match.currentTurn >= TURNS_PER_ROUND) {
+    if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
     }
@@ -163,7 +158,6 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // 1. Calculate Potential Actions
     if (g1.value <= resultDice) {
         const item = ITEMS[p1ItemName];
         if (item.type === "heal") p1Heal = item.value + g1.value;
@@ -178,12 +172,10 @@ function processResults(g1, g2) {
         else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
     }
 
-    // 2. Apply Dodge Mitigation (Nullify damage BEFORE health calculation)
     if (p1Dodged) { p2Dmg = 0; match.bonusPlayerIndex = 0; }
     if (p2Dodged) { p1Dmg = 0; match.bonusPlayerIndex = 1; }
-    if (p1Dodged && p2Dodged) match.bonusPlayerIndex = -1; // Both dodge = no bonus
+    if (p1Dodged && p2Dodged) match.bonusPlayerIndex = -1; 
 
-    // 3. Apply Final Values
     match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0] + p1Heal - p2Dmg));
     match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1] + p2Heal - p1Dmg));
 
@@ -199,13 +191,16 @@ function processResults(g1, g2) {
         hasBonus: match.bonusPlayerIndex
     });
 
+    match.animsFinished = [false, false]; 
     if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(proceedAfterAnimation, ANIM_SAFETY_TIMEOUT);
 }
 
 function proceedAfterAnimation() {
-    if (turnTimer) clearTimeout(turnTimer);
-    match.animsFinished = [false, false];
+    if (turnTimer) {
+        clearTimeout(turnTimer);
+        turnTimer = null;
+    }
 
     if (match.health[0] <= 0 || match.health[1] <= 0) {
         endRound();
@@ -215,6 +210,7 @@ function proceedAfterAnimation() {
     if (match.bonusPlayerIndex !== -1) {
         match.status = "bonus_move";
         broadcast({ type: "bonus_start", playerIndex: match.bonusPlayerIndex });
+        match.animsFinished = [false, false]; // Reset for bonus animation
         turnTimer = setTimeout(handleAFK, TURN_TIME_LIMIT);
         return;
     }
@@ -300,9 +296,11 @@ wss.on("connection", (ws) => {
                     health: match.health 
                 });
 
-                match.bonusPlayerIndex = -1; 
+                match.bonusPlayerIndex = -1; // End bonus state immediately
+                match.animsFinished = [false, false]; // Reset to wait for bonus anim_done
+                
                 if (turnTimer) clearTimeout(turnTimer);
-                setTimeout(proceedAfterAnimation, 4000); 
+                turnTimer = setTimeout(proceedAfterAnimation, 5000); 
             }
         }
 
