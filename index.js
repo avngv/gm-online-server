@@ -52,7 +52,6 @@ function broadcast(obj) {
     players.forEach(p => sendToGM(p.ws, obj));
 }
 
-// --- GAME LOGIC ---
 function rollDice() {
     let set = [1, 2, 3, 4, 5, 6];
     for (let i = set.length - 1; i > 0; i--) {
@@ -62,6 +61,7 @@ function rollDice() {
     return set;
 }
 
+// --- CORE GAME LOGIC ---
 function startMatch(isFirstBattleStart = false) {
     if (turnTimer) {
         clearTimeout(turnTimer);
@@ -73,6 +73,7 @@ function startMatch(isFirstBattleStart = false) {
         return;
     }
 
+    // Persistent Health Logic: Only reset to 100 at the very start of a fight
     if (isFirstBattleStart) {
         match.health = [MAX_HP, MAX_HP];
     }
@@ -161,12 +162,13 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
+    // Calculate Player 1
     if (p1Success) {
-        const item = ITEMS[p1ItemName];
-        let total = (item ? item.value : 0) + g1.value;
+        const item = ITEMS[p1ItemName] || { type: "damage", value: 0 }; // Fallback to 0 if item missing
+        let total = (item.value || 0) + g1.value;
         if (resultDice === 6) total = Math.floor(total * 1.5);
         
-        if (item && item.type === "heal") {
+        if (item.type === "heal") {
             p1Heal = total;
             match.health[0] += p1Heal;
         } else {
@@ -175,12 +177,13 @@ function processResults(g1, g2) {
         }
     }
 
+    // Calculate Player 2
     if (p2Success) {
-        const item = ITEMS[p2ItemName];
-        let total = (item ? item.value : 0) + g2.value;
+        const item = ITEMS[p2ItemName] || { type: "damage", value: 0 };
+        let total = (item.value || 0) + g2.value;
         if (resultDice === 6) total = Math.floor(total * 1.5);
 
-        if (item && item.type === "heal") {
+        if (item.type === "heal") {
             p2Heal = total;
             match.health[1] += p2Heal;
         } else {
@@ -189,12 +192,11 @@ function processResults(g1, g2) {
         }
     }
 
-    match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0]));
-    match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1]));
+    // Clamp health between 0 and 100
+    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
+    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
 
-    let firstActor = -1;
-    if (g1.value > g2.value) firstActor = 0;
-    else if (g2.value > g1.value) firstActor = 1;
+    console.log(`Round Result: HP [${match.health[0]}, ${match.health[1]}]`);
 
     broadcast({
         type: "turn_result",
@@ -208,10 +210,8 @@ function processResults(g1, g2) {
             slot: g2.slot, itemName: p2ItemName, guess: g2.value, 
             success: p2Success, dmg: p2Dmg, heal: p2Heal 
         },
-        firstActor: firstActor
+        firstActor: (g1.value > g2.value) ? 0 : (g2.value > g1.value ? 1 : -1)
     });
-
-    if (turnTimer) clearTimeout(turnTimer);
 
     if (match.health[0] <= 0 || match.health[1] <= 0) {
         setTimeout(() => { if (match.status === "results") endRound(); }, 3000);
@@ -255,7 +255,7 @@ wss.on("connection", (ws) => {
             
             if (players.length === 2) {
                 broadcast({ type: "player_joined" });
-                startMatch(true);
+                startMatch(true); // Initial start resets health
             }
         }
 
@@ -301,4 +301,4 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, "0.0.0.0", () => console.log(`Server listening on port ${PORT}`));
