@@ -13,7 +13,7 @@ const MAX_HP = 100;
 const ITEMS = {
     "sword": { type: "damage", value: 3 },
     "heal": { type: "heal", value: 3 },
-    "dodge": { type: "dodge", value: 0 } // Added Dodge
+    "dodge": { type: "dodge", value: 0 }
 };
 
 const server = http.createServer();
@@ -33,7 +33,7 @@ let match = {
     status: "waiting",
     animsFinished: [false, false],
     roundReady: [false, false],
-    bonusPlayerIndex: -1 // Track who gets a bonus move
+    bonusPlayerIndex: -1 
 };
 
 // --- UTILITIES ---
@@ -65,10 +65,7 @@ function rollDice() {
 
 // --- GAME LOGIC ---
 function startMatch(isFirstJoin = false) {
-    if (turnTimer) {
-        clearTimeout(turnTimer);
-        turnTimer = null;
-    }
+    if (turnTimer) clearTimeout(turnTimer);
 
     if (players.length < 2) {
         match.status = "waiting";
@@ -118,8 +115,10 @@ function nextTurn() {
 
     match.currentTurn++;
     match.status = "playing";
-    match.bonusPlayerIndex = -1; // Reset bonus each turn
+    match.bonusPlayerIndex = -1; 
     match.animsFinished = [false, false]; 
+    match.guesses[0][match.currentTurn - 1] = undefined;
+    match.guesses[1][match.currentTurn - 1] = undefined;
     
     broadcast({ 
         type: "turn_start", 
@@ -140,7 +139,8 @@ function handleAFK() {
         });
         checkTurnCompletion();
     } else if (match.status === "bonus_move") {
-        proceedAfterAnimation(); // Skip bonus if AFK
+        match.bonusPlayerIndex = -1;
+        proceedAfterAnimation();
     }
 }
 
@@ -179,29 +179,16 @@ function processResults(g1, g2) {
     }
 
     // 2. Apply Dodge Mitigation (Nullify damage BEFORE health calculation)
-    if (p1Dodged) { 
-        p2Dmg = 0; 
-        match.bonusPlayerIndex = 0; 
-    }
-    if (p2Dodged) { 
-        p1Dmg = 0; 
-        match.bonusPlayerIndex = 1; 
-    }
+    if (p1Dodged) { p2Dmg = 0; match.bonusPlayerIndex = 0; }
+    if (p2Dodged) { p1Dmg = 0; match.bonusPlayerIndex = 1; }
+    if (p1Dodged && p2Dodged) match.bonusPlayerIndex = -1; // Both dodge = no bonus
 
-    // 3. Apply Final Values to Global Health
-    match.health[0] += p1Heal;
-    match.health[1] -= p1Dmg;
-
-    match.health[1] += p2Heal;
-    match.health[0] -= p2Dmg;
-
-    // Apply caps
-    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
-    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
+    // 3. Apply Final Values
+    match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0] + p1Heal - p2Dmg));
+    match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1] + p2Heal - p1Dmg));
 
     let firstActor = g1.value > g2.value ? 0 : (g2.value > g1.value ? 1 : -1);
 
-    // 4. Broadcast the clean result
     broadcast({
         type: "turn_result",
         dice: resultDice,
@@ -218,16 +205,21 @@ function processResults(g1, g2) {
 
 function proceedAfterAnimation() {
     if (turnTimer) clearTimeout(turnTimer);
+    match.animsFinished = [false, false];
 
-    // If there is a bonus move, handle it before continuing
-    if (match.bonusPlayerIndex !== -1 && match.health[0] > 0 && match.health[1] > 0) {
-        match.status = "bonus_move";
-        broadcast({ type: "bonus_start", playerIndex: match.bonusPlayerIndex });
-        turnTimer = setTimeout(proceedAfterAnimation, TURN_TIME_LIMIT);
+    if (match.health[0] <= 0 || match.health[1] <= 0) {
+        endRound();
         return;
     }
 
-    if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
+    if (match.bonusPlayerIndex !== -1) {
+        match.status = "bonus_move";
+        broadcast({ type: "bonus_start", playerIndex: match.bonusPlayerIndex });
+        turnTimer = setTimeout(handleAFK, TURN_TIME_LIMIT);
+        return;
+    }
+
+    if (match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
     } else {
         nextTurn();
@@ -308,8 +300,9 @@ wss.on("connection", (ws) => {
                     health: match.health 
                 });
 
-                match.bonusPlayerIndex = -1; // Reset bonus
-                setTimeout(proceedAfterAnimation, 3000); 
+                match.bonusPlayerIndex = -1; 
+                if (turnTimer) clearTimeout(turnTimer);
+                setTimeout(proceedAfterAnimation, 4000); 
             }
         }
 
@@ -340,4 +333,4 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, "0.0.0.0", () => console.log(`Server Online`));
