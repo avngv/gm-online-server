@@ -78,11 +78,13 @@ function startMatch() {
 
     players.forEach((p, index) => {
         const opponentIndex = index === 0 ? 1 : 0;
+        const opponent = players[opponentIndex];
         sendToGM(p.ws, { 
             type: "game_prepare", 
             yourIndex: index, 
             turn: 0,
-            opponentSlotCount: players[opponentIndex].equipments.length 
+            // CRASH FIX: Added safety check for existing opponent
+            opponentSlotCount: opponent ? opponent.equipments.length : 0 
         });
     });
     
@@ -90,7 +92,6 @@ function startMatch() {
 }
 
 function nextTurn() {
-    // If we somehow hit this at turn 6, redirect to endRound
     if (match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
@@ -156,20 +157,22 @@ function processResults(g1, g2) {
 
     if (turnTimer) clearTimeout(turnTimer);
 
-    // --- TURN 6 FILTER ---
+    // TURN 6 FILTER: Prevent nextTurn call if round is done
     if (match.currentTurn < TURNS_PER_ROUND) {
-        // Normal Turn: Wait for animations or safety timeout
         turnTimer = setTimeout(() => { 
             if (match.status === "results") nextTurn(); 
         }, ANIM_SAFETY_TIMEOUT);
     } else {
-        // TURN 6: Do not set a nextTurn timer. Transition to endRound instead.
-        console.log("Turn 6 results finished. Transitioning to Round Wait.");
-        setTimeout(endRound, 2000); // 2s delay to let clients see the final dice result
+        // Just wait for anim_done or trigger endRound after delay
+        console.log("Round Turn Limit Reached.");
+        setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
     }
 }
 
 function endRound() {
+    // Only proceed if we aren't already waiting
+    if (match.status === "round_wait") return;
+
     console.log("Entering 'round_wait' status.");
     if (turnTimer) clearTimeout(turnTimer);
     
@@ -182,10 +185,10 @@ function endRound() {
         currentScores: match.scores
     });
 
-    // Auto-start safety timer (10 seconds)
+    // 10-second AUTO-START
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") {
-            console.log("AUTO-START: Players took too long.");
+            console.log("AUTO-START triggered.");
             startMatch();
         }
     }, 10000);
@@ -197,7 +200,6 @@ wss.on("connection", (ws) => {
         const msg = safeJSON(data);
         if (!msg) return;
 
-        // JOIN
         if (msg.type === "join") {
             const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
@@ -221,7 +223,6 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // GUESS
         if (msg.type === "guess" && match.status === "playing") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
@@ -229,15 +230,12 @@ wss.on("connection", (ws) => {
             checkTurnCompletion();
         }
 
-        // ANIM DONE
         if (msg.type === "anim_done" && match.status === "results") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx !== -1) {
                 match.animsFinished[pIdx] = true;
                 if (match.animsFinished[0] && match.animsFinished[1]) {
                     if (turnTimer) clearTimeout(turnTimer);
-                    
-                    // Respect the Turn 6 filter here too
                     if (match.currentTurn < TURNS_PER_ROUND) {
                         nextTurn();
                     } else {
@@ -247,23 +245,19 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // ROUND READY
         if (msg.type === "round_ready") {
-            console.log(`[READY PACKET] From: ${ws.playerId}. Server status: ${match.status}`);
-            
-            // Safety: Accept ready even if still in 'results' for the last microsecond
-            if (match.status !== "round_wait" && match.status !== "results") {
-                return;
-            }
+            // STRICT MODE: Only accept if status is exactly round_wait
+            if (match.status === "round_wait") {
+                const pIdx = match.playerIds.indexOf(ws.playerId);
+                if (pIdx !== -1 && !match.roundReady[pIdx]) {
+                    match.roundReady[pIdx] = true;
+                    console.log(`Player ${pIdx} is READY.`);
+                    broadcast({ type: "opponent_ready", playerIndex: pIdx });
 
-            const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx !== -1 && !match.roundReady[pIdx]) {
-                match.roundReady[pIdx] = true;
-                broadcast({ type: "opponent_ready", playerIndex: pIdx });
-
-                if (match.roundReady[0] && match.roundReady[1]) {
-                    if (turnTimer) clearTimeout(turnTimer);
-                    startMatch(); 
+                    if (match.roundReady[0] && match.roundReady[1]) {
+                        if (turnTimer) clearTimeout(turnTimer);
+                        startMatch(); 
+                    }
                 }
             }
         }
