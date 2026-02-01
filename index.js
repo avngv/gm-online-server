@@ -163,7 +163,7 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // P1 Logic
+    // 1. Calculate Potential Actions
     if (g1.value <= resultDice) {
         const item = ITEMS[p1ItemName];
         if (item.type === "heal") p1Heal = item.value + g1.value;
@@ -171,7 +171,6 @@ function processResults(g1, g2) {
         else if (item.type === "dodge" && g1.value >= g2.value) p1Dodged = true;
     }
 
-    // P2 Logic
     if (g2.value <= resultDice) {
         const item = ITEMS[p2ItemName];
         if (item.type === "heal") p2Heal = item.value + g2.value;
@@ -179,15 +178,30 @@ function processResults(g1, g2) {
         else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
     }
 
-    // Apply Dodge Mitigation & Set Bonus
-    if (p1Dodged) { p2Dmg = 0; match.bonusPlayerIndex = 0; }
-    if (p2Dodged) { p1Dmg = 0; match.bonusPlayerIndex = 1; }
+    // 2. Apply Dodge Mitigation (Nullify damage BEFORE health calculation)
+    if (p1Dodged) { 
+        p2Dmg = 0; 
+        match.bonusPlayerIndex = 0; 
+    }
+    if (p2Dodged) { 
+        p1Dmg = 0; 
+        match.bonusPlayerIndex = 1; 
+    }
 
-    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0] + p1Heal - p2Dmg)));
-    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1] + p2Heal - p1Dmg)));
+    // 3. Apply Final Values to Global Health
+    match.health[0] += p1Heal;
+    match.health[1] -= p1Dmg;
+
+    match.health[1] += p2Heal;
+    match.health[0] -= p2Dmg;
+
+    // Apply caps
+    match.health[0] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[0])));
+    match.health[1] = Math.max(0, Math.min(MAX_HP, Math.round(match.health[1])));
 
     let firstActor = g1.value > g2.value ? 0 : (g2.value > g1.value ? 1 : -1);
 
+    // 4. Broadcast the clean result
     broadcast({
         type: "turn_result",
         dice: resultDice,
