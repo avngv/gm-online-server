@@ -7,7 +7,7 @@ const TURNS_PER_ROUND = 6;
 const RECONNECT_TIMEOUT = 30000;
 const TURN_TIME_LIMIT = 10000; 
 const ANIM_SAFETY_TIMEOUT = 15000; 
-const MAX_HP = 100; // Added constant for health cap
+const MAX_HP = 100;
 
 // --- DATA DEFINITIONS ---
 const ITEMS = {
@@ -62,7 +62,7 @@ function rollDice() {
     return set;
 }
 
-function startMatch() {
+function startMatch(isFirstBattleStart = false) {
     if (turnTimer) {
         clearTimeout(turnTimer);
         turnTimer = null;
@@ -73,10 +73,14 @@ function startMatch() {
         return;
     }
 
+    // Only reset HP to 100 if this is the start of the whole fight
+    if (isFirstBattleStart) {
+        match.health = [MAX_HP, MAX_HP];
+    }
+
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
-    match.health = [MAX_HP, MAX_HP];
     match.currentTurn = 0; 
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
@@ -99,6 +103,12 @@ function startMatch() {
 }
 
 function nextTurn() {
+    // End if someone is dead before turn starts
+    if (match.health[0] <= 0 || match.health[1] <= 0) {
+        endRound();
+        return;
+    }
+
     if (match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
@@ -153,7 +163,7 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // P1 Calculation
+    // P1 Action
     if (p1Success) {
         const item = ITEMS[p1ItemName];
         let total = (item ? item.value : 0) + g1.value;
@@ -168,7 +178,7 @@ function processResults(g1, g2) {
         }
     }
 
-    // P2 Calculation
+    // P2 Action
     if (p2Success) {
         const item = ITEMS[p2ItemName];
         let total = (item ? item.value : 0) + g2.value;
@@ -183,7 +193,7 @@ function processResults(g1, g2) {
         }
     }
 
-    // Caps: Health cannot drop below 0 or exceed MAX_HP
+    // HP Clamping
     match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0]));
     match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1]));
 
@@ -208,7 +218,10 @@ function processResults(g1, g2) {
 
     if (turnTimer) clearTimeout(turnTimer);
 
-    if (match.currentTurn < TURNS_PER_ROUND) {
+    // If someone is dead, wait a moment then trigger endRound
+    if (match.health[0] <= 0 || match.health[1] <= 0) {
+        setTimeout(() => { if (match.status === "results") endRound(); }, 3000);
+    } else if (match.currentTurn < TURNS_PER_ROUND) {
         turnTimer = setTimeout(() => { 
             if (match.status === "results") nextTurn(); 
         }, ANIM_SAFETY_TIMEOUT);
@@ -220,11 +233,19 @@ function processResults(g1, g2) {
 function endRound() {
     if (match.status === "round_wait") return;
     if (turnTimer) clearTimeout(turnTimer);
+    
     match.status = "round_wait"; 
     match.roundReady = [false, false];
+
     broadcast({ type: "new_dice_round", health: match.health });
+
+    // Auto-start next dice round after 10s (persists current HP)
     turnTimer = setTimeout(() => {
-        if (match.status === "round_wait") startMatch();
+        if (match.status === "round_wait") {
+            // If someone was dead, reset whole match, otherwise just next round
+            const someoneDead = match.health[0] <= 0 || match.health[1] <= 0;
+            startMatch(someoneDead); 
+        }
     }, 10000);
 }
 
@@ -235,25 +256,15 @@ wss.on("connection", (ws) => {
         if (!msg) return;
 
         if (msg.type === "join") {
-            const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
-            if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
-                clearTimeout(disconnectedPlayers[existingId]);
-                delete disconnectedPlayers[existingId];
-                ws.playerId = existingId;
-                players.push({ ws, playerId: existingId, equipments: clientEquips });
-                sendToGM(ws, { type: "reconnect", matchState: match });
-                return;
-            }
-            if (players.length < 2) {
-                const newId = randomUUID();
-                ws.playerId = newId;
-                players.push({ ws, playerId: newId, equipments: clientEquips });
-                sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
-                if (players.length === 2) {
-                    broadcast({ type: "player_joined" });
-                    startMatch();
-                }
+            const newId = randomUUID();
+            ws.playerId = newId;
+            players.push({ ws, playerId: newId, equipments: clientEquips });
+            sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
+            
+            if (players.length === 2) {
+                broadcast({ type: "player_joined" });
+                startMatch(true); // First match start resets HP to 100
             }
         }
 
@@ -270,27 +281,4 @@ wss.on("connection", (ws) => {
                 match.animsFinished[pIdx] = true;
                 if (match.animsFinished[0] && match.animsFinished[1]) {
                     if (turnTimer) clearTimeout(turnTimer);
-                    if (match.currentTurn < TURNS_PER_ROUND) nextTurn();
-                    else endRound();
-                }
-            }
-        }
-
-        if (msg.type === "round_ready" && match.status === "round_wait") {
-            const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx !== -1 && !match.roundReady[pIdx]) {
-                match.roundReady[pIdx] = true;
-                broadcast({ type: "opponent_ready", playerIndex: pIdx });
-                if (match.roundReady[0] && match.roundReady[1]) startMatch(); 
-            }
-        }
-    });
-
-    ws.on("close", () => {
-        const playerId = ws.playerId;
-        players = players.filter(p => p.playerId !== playerId);
-        disconnectedPlayers[playerId] = setTimeout(() => delete disconnectedPlayers[playerId], RECONNECT_TIMEOUT);
-    });
-});
-
-server.listen(PORT, "0.0.0.0");
+                    if (match.health[0] <= 0 || match.health[1] <=
