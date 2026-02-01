@@ -18,7 +18,7 @@ let turnTimer = null;
 let match = {
     diceRolls: [],
     guesses: [[], []],
-    scores: [0, 0], 
+    health: [100, 100], // Tracking health for both players
     currentTurn: 0,
     playerIds: [],
     playerLoadouts: [[], []], 
@@ -56,7 +56,6 @@ function rollDice() {
 }
 
 function startMatch() {
-    console.log("!!! STARTING NEW MATCH BLOCK !!!");
     if (turnTimer) {
         clearTimeout(turnTimer);
         turnTimer = null;
@@ -70,6 +69,7 @@ function startMatch() {
     match.status = "preparing";
     match.diceRolls = rollDice();
     match.guesses = [[], []];
+    match.health = [100, 100]; // Initialize health to 100
     match.currentTurn = 0; 
     match.playerIds = players.map(p => p.playerId);
     match.playerLoadouts = players.map(p => p.equipments); 
@@ -83,7 +83,7 @@ function startMatch() {
             type: "game_prepare", 
             yourIndex: index, 
             turn: 0,
-            // CRASH FIX: Added safety check for existing opponent
+            health: match.health, // Broadcast initial health
             opponentSlotCount: opponent ? opponent.equipments.length : 0 
         });
     });
@@ -104,7 +104,7 @@ function nextTurn() {
     broadcast({ 
         type: "turn_start", 
         turn: match.currentTurn,
-        scores: match.scores 
+        health: match.health // Keep client updated on current health
     });
 
     if (turnTimer) clearTimeout(turnTimer);
@@ -118,7 +118,7 @@ function handleAFK() {
             const loadout = match.playerLoadouts[i];
             const randomSlot = Math.floor(Math.random() * loadout.length);
             const randomDice = Math.floor(Math.random() * 6) + 1;
-            match.guesses[i][match.currentTurn - 1] = { value: randomDice, slot: randomSlot, item: loadout[randomSlot], afk: true };
+            match.guesses[i][match.currentTurn - 1] = { value: randomDice, slot: randomSlot };
         }
     });
     checkTurnCompletion();
@@ -136,11 +136,9 @@ function checkTurnCompletion() {
 function processResults(g1, g2) {
     match.status = "results";
     const resultDice = match.diceRolls[match.currentTurn - 1];
+    
     const p1Success = g1.value <= resultDice;
     const p2Success = g2.value <= resultDice;
-
-    if (p1Success) match.scores[0]++;
-    if (p2Success) match.scores[1]++;
 
     let firstActor = -1;
     if (g1.value > g2.value) firstActor = 0;
@@ -149,48 +147,37 @@ function processResults(g1, g2) {
     broadcast({
         type: "turn_result",
         dice: resultDice,
-        updatedScores: match.scores,
-        p1: { slot: g1.slot, itemName: match.playerLoadouts[0][g1.slot], guess: g1.value, success: p1Success, afk: !!g1.afk },
-        p2: { slot: g2.slot, itemName: match.playerLoadouts[1][g2.slot], guess: g2.value, success: p2Success, afk: !!g2.afk },
+        health: match.health, // Broadcasting current health state
+        p1: { slot: g1.slot, guess: g1.value, success: p1Success },
+        p2: { slot: g2.slot, guess: g2.value, success: p2Success },
         firstActor: firstActor
     });
 
     if (turnTimer) clearTimeout(turnTimer);
 
-    // TURN 6 FILTER: Prevent nextTurn call if round is done
     if (match.currentTurn < TURNS_PER_ROUND) {
         turnTimer = setTimeout(() => { 
             if (match.status === "results") nextTurn(); 
         }, ANIM_SAFETY_TIMEOUT);
     } else {
-        // Just wait for anim_done or trigger endRound after delay
-        console.log("Round Turn Limit Reached.");
         setTimeout(() => { if (match.status === "results") endRound(); }, 2000);
     }
 }
 
 function endRound() {
-    // Only proceed if we aren't already waiting
     if (match.status === "round_wait") return;
 
-    console.log("Entering 'round_wait' status.");
     if (turnTimer) clearTimeout(turnTimer);
-    
     match.status = "round_wait"; 
     match.roundReady = [false, false];
 
     broadcast({
         type: "new_dice_round",
-        message: "Round Over! Click Ready.",
-        currentScores: match.scores
+        health: match.health // Final health state for the round
     });
 
-    // 10-second AUTO-START
     turnTimer = setTimeout(() => {
-        if (match.status === "round_wait") {
-            console.log("AUTO-START triggered.");
-            startMatch();
-        }
+        if (match.status === "round_wait") startMatch();
     }, 10000);
 }
 
@@ -226,7 +213,7 @@ wss.on("connection", (ws) => {
         if (msg.type === "guess" && match.status === "playing") {
             const pIdx = match.playerIds.indexOf(ws.playerId);
             if (pIdx === -1 || match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
-            match.guesses[pIdx][match.currentTurn - 1] = { value: msg.value, slot: msg.slot_index, item: match.playerLoadouts[pIdx][msg.slot_index] };
+            match.guesses[pIdx][match.currentTurn - 1] = { value: msg.value, slot: msg.slot_index };
             checkTurnCompletion();
         }
 
@@ -236,29 +223,18 @@ wss.on("connection", (ws) => {
                 match.animsFinished[pIdx] = true;
                 if (match.animsFinished[0] && match.animsFinished[1]) {
                     if (turnTimer) clearTimeout(turnTimer);
-                    if (match.currentTurn < TURNS_PER_ROUND) {
-                        nextTurn();
-                    } else {
-                        endRound();
-                    }
+                    if (match.currentTurn < TURNS_PER_ROUND) nextTurn();
+                    else endRound();
                 }
             }
         }
 
-        if (msg.type === "round_ready") {
-            // STRICT MODE: Only accept if status is exactly round_wait
-            if (match.status === "round_wait") {
-                const pIdx = match.playerIds.indexOf(ws.playerId);
-                if (pIdx !== -1 && !match.roundReady[pIdx]) {
-                    match.roundReady[pIdx] = true;
-                    console.log(`Player ${pIdx} is READY.`);
-                    broadcast({ type: "opponent_ready", playerIndex: pIdx });
-
-                    if (match.roundReady[0] && match.roundReady[1]) {
-                        if (turnTimer) clearTimeout(turnTimer);
-                        startMatch(); 
-                    }
-                }
+        if (msg.type === "round_ready" && match.status === "round_wait") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1 && !match.roundReady[pIdx]) {
+                match.roundReady[pIdx] = true;
+                broadcast({ type: "opponent_ready", playerIndex: pIdx });
+                if (match.roundReady[0] && match.roundReady[1]) startMatch(); 
             }
         }
     });
@@ -270,4 +246,4 @@ wss.on("connection", (ws) => {
     });
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, "0.0.0.0");
