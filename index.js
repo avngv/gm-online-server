@@ -145,12 +145,14 @@ function processResults(g1, g2) {
     const p1Success = g1.value <= resultDice;
     const p2Success = g2.value <= resultDice;
 
-    // --- NEW DAMAGE CALCULATION ---
     let p1Dmg = 0;
     let p2Dmg = 0;
 
+    // Get item names for dmg calculation and broadcasting
+    const p1ItemName = match.playerLoadouts[0][g1.slot];
+    const p2ItemName = match.playerLoadouts[1][g2.slot];
+
     if (p1Success) {
-        const p1ItemName = match.playerLoadouts[0][g1.slot];
         const weapon = WEAPONS[p1ItemName];
         const base = weapon ? weapon.base_dmg : 0;
         p1Dmg = base + g1.value;
@@ -158,14 +160,12 @@ function processResults(g1, g2) {
     }
 
     if (p2Success) {
-        const p2ItemName = match.playerLoadouts[1][g2.slot];
         const weapon = WEAPONS[p2ItemName];
         const base = weapon ? weapon.base_dmg : 0;
         p2Dmg = base + g2.value;
         match.health[0] -= p2Dmg;
     }
 
-    // Clamp health to 0
     match.health[0] = Math.max(0, match.health[0]);
     match.health[1] = Math.max(0, match.health[1]);
 
@@ -177,8 +177,20 @@ function processResults(g1, g2) {
         type: "turn_result",
         dice: resultDice,
         health: match.health,
-        p1: { slot: g1.slot, guess: g1.value, success: p1Success, dmg: p1Dmg },
-        p2: { slot: g2.slot, guess: g2.value, success: p2Success, dmg: p2Dmg },
+        p1: { 
+            slot: g1.slot, 
+            itemName: p1ItemName, // RE-ADDED
+            guess: g1.value, 
+            success: p1Success, 
+            dmg: p1Dmg 
+        },
+        p2: { 
+            slot: g2.slot, 
+            itemName: p2ItemName, // RE-ADDED
+            guess: g2.value, 
+            success: p2Success, 
+            dmg: p2Dmg 
+        },
         firstActor: firstActor
     });
 
@@ -198,9 +210,7 @@ function endRound() {
     if (turnTimer) clearTimeout(turnTimer);
     match.status = "round_wait"; 
     match.roundReady = [false, false];
-
     broadcast({ type: "new_dice_round", health: match.health });
-
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") startMatch();
     }, 10000);
