@@ -73,7 +73,6 @@ function startMatch(isFirstBattleStart = false) {
         return;
     }
 
-    // Only reset HP to 100 if this is the start of the whole fight
     if (isFirstBattleStart) {
         match.health = [MAX_HP, MAX_HP];
     }
@@ -103,7 +102,6 @@ function startMatch(isFirstBattleStart = false) {
 }
 
 function nextTurn() {
-    // End if someone is dead before turn starts
     if (match.health[0] <= 0 || match.health[1] <= 0) {
         endRound();
         return;
@@ -163,7 +161,6 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // P1 Action
     if (p1Success) {
         const item = ITEMS[p1ItemName];
         let total = (item ? item.value : 0) + g1.value;
@@ -178,7 +175,6 @@ function processResults(g1, g2) {
         }
     }
 
-    // P2 Action
     if (p2Success) {
         const item = ITEMS[p2ItemName];
         let total = (item ? item.value : 0) + g2.value;
@@ -193,7 +189,6 @@ function processResults(g1, g2) {
         }
     }
 
-    // HP Clamping
     match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0]));
     match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1]));
 
@@ -218,7 +213,6 @@ function processResults(g1, g2) {
 
     if (turnTimer) clearTimeout(turnTimer);
 
-    // If someone is dead, wait a moment then trigger endRound
     if (match.health[0] <= 0 || match.health[1] <= 0) {
         setTimeout(() => { if (match.status === "results") endRound(); }, 3000);
     } else if (match.currentTurn < TURNS_PER_ROUND) {
@@ -236,13 +230,10 @@ function endRound() {
     
     match.status = "round_wait"; 
     match.roundReady = [false, false];
-
     broadcast({ type: "new_dice_round", health: match.health });
 
-    // Auto-start next dice round after 10s (persists current HP)
     turnTimer = setTimeout(() => {
         if (match.status === "round_wait") {
-            // If someone was dead, reset whole match, otherwise just next round
             const someoneDead = match.health[0] <= 0 || match.health[1] <= 0;
             startMatch(someoneDead); 
         }
@@ -264,7 +255,7 @@ wss.on("connection", (ws) => {
             
             if (players.length === 2) {
                 broadcast({ type: "player_joined" });
-                startMatch(true); // First match start resets HP to 100
+                startMatch(true);
             }
         }
 
@@ -281,4 +272,33 @@ wss.on("connection", (ws) => {
                 match.animsFinished[pIdx] = true;
                 if (match.animsFinished[0] && match.animsFinished[1]) {
                     if (turnTimer) clearTimeout(turnTimer);
-                    if (match.health[0] <= 0 || match.health[1] <=
+                    if (match.health[0] <= 0 || match.health[1] <= 0) endRound();
+                    else if (match.currentTurn < TURNS_PER_ROUND) nextTurn();
+                    else endRound();
+                }
+            }
+        }
+
+        if (msg.type === "round_ready" && match.status === "round_wait") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1 && !match.roundReady[pIdx]) {
+                match.roundReady[pIdx] = true;
+                broadcast({ type: "opponent_ready", playerIndex: pIdx });
+                if (match.roundReady[0] && match.roundReady[1]) {
+                    const someoneDead = match.health[0] <= 0 || match.health[1] <= 0;
+                    startMatch(someoneDead); 
+                }
+            }
+        }
+    });
+
+    ws.on("close", () => {
+        players = players.filter(p => p.ws !== ws);
+        if (players.length < 2) {
+            match.status = "waiting";
+            if (turnTimer) clearTimeout(turnTimer);
+        }
+    });
+});
+
+server.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
