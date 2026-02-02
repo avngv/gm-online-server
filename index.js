@@ -63,6 +63,19 @@ function rollDice() {
     return set;
 }
 
+// --- NEW MECHANICS ---
+function checkLobbyReady() {
+    if (match.roundReady[0] && match.roundReady[1]) {
+        match.status = "starting_countdown";
+        broadcast({ type: "match_starting" });
+        
+        // 2 Second delay before game starts
+        setTimeout(() => {
+            startMatch(true);
+        }, 2000);
+    }
+}
+
 // --- GAME LOGIC ---
 function startMatch(isFirstJoin = false) {
     if (turnTimer) clearTimeout(turnTimer);
@@ -163,7 +176,6 @@ function processResults(g1, g2) {
     const p1ItemName = match.playerLoadouts[0][g1.slot];
     const p2ItemName = match.playerLoadouts[1][g2.slot];
 
-    // 1. Calculate Potential Actions
     if (g1.value <= resultDice) {
         const item = ITEMS[p1ItemName];
         if (item.type === "heal") p1Heal = item.value + g1.value;
@@ -178,12 +190,10 @@ function processResults(g1, g2) {
         else if (item.type === "dodge" && g2.value >= g1.value) p2Dodged = true;
     }
 
-    // 2. Apply Dodge Mitigation (Nullify damage BEFORE health calculation)
     if (p1Dodged) { p2Dmg = 0; match.bonusPlayerIndex = 0; }
     if (p2Dodged) { p1Dmg = 0; match.bonusPlayerIndex = 1; }
-    if (p1Dodged && p2Dodged) match.bonusPlayerIndex = -1; // Both dodge = no bonus
+    if (p1Dodged && p2Dodged) match.bonusPlayerIndex = -1; 
 
-    // 3. Apply Final Values
     match.health[0] = Math.max(0, Math.min(MAX_HP, match.health[0] + p1Heal - p2Dmg));
     match.health[1] = Math.max(0, Math.min(MAX_HP, match.health[1] + p2Heal - p1Dmg));
 
@@ -261,9 +271,23 @@ wss.on("connection", (ws) => {
                 players.push({ ws, playerId: newId, equipments: clientEquips });
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
                 if (players.length === 2) {
-                    broadcast({ type: "player_joined" });
-                    startMatch(true); 
+                    match.playerIds = players.map(p => p.playerId);
+                    match.roundReady = [false, false]; // Reset ready for lobby
+                    
+                    // Inform player 1 and tell both to show Ready button
+                    sendToGM(players[0].ws, { type: "player_joined" });
+                    broadcast({ type: "can_start_now" }); 
                 }
+            }
+        }
+
+        // New lobby ready logic
+        if (msg.type === "player_ready") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1) {
+                match.roundReady[pIdx] = true;
+                broadcast({ type: "opponent_ready", playerIndex: pIdx });
+                checkLobbyReady();
             }
         }
 
