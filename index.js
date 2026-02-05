@@ -257,8 +257,27 @@ wss.on("connection", (ws) => {
                 players.push({ ws, playerId: newId, equipments: clientEquips });
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
                 if (players.length === 2) {
+                    // STORE IDs AND WAIT FOR READY
+                    match.playerIds = players.map(p => p.playerId);
+                    match.roundReady = [false, false];
+                    
                     broadcast({ type: "player_joined" });
-                    startMatch(true); 
+                    broadcast({ type: "can_start_now" }); // <--- WAIT STATE TRIGGER
+                }
+            }
+        }
+
+        // --- ADDED PLAYER_READY HANDLER ---
+        if (msg.type === "player_ready") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1 && !match.roundReady[pIdx]) {
+                match.roundReady[pIdx] = true;
+                
+                if (match.roundReady[0] && match.roundReady[1]) {
+                    broadcast({ type: "match_starting" });
+                    setTimeout(() => {
+                        startMatch(true); 
+                    }, 2000); // 2-second countdown
                 }
             }
         }
@@ -296,8 +315,8 @@ wss.on("connection", (ws) => {
                     health: match.health 
                 });
 
-                match.bonusPlayerIndex = -1; // End bonus state immediately
-                match.animsFinished = [false, false]; // Reset to wait for bonus anim_done
+                match.bonusPlayerIndex = -1; 
+                match.animsFinished = [false, false]; 
                 
                 if (turnTimer) clearTimeout(turnTimer);
                 turnTimer = setTimeout(proceedAfterAnimation, 5000); 
