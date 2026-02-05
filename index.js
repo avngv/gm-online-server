@@ -63,19 +63,6 @@ function rollDice() {
     return set;
 }
 
-// --- NEW MECHANICS ---
-function checkLobbyReady() {
-    if (match.roundReady[0] && match.roundReady[1]) {
-        match.status = "starting_countdown";
-        broadcast({ type: "match_starting" });
-        
-        // 2 Second delay before game starts
-        setTimeout(() => {
-            startMatch(true);
-        }, 2000);
-    }
-}
-
 // --- GAME LOGIC ---
 function startMatch(isFirstJoin = false) {
     if (turnTimer) clearTimeout(turnTimer);
@@ -116,12 +103,7 @@ function startMatch(isFirstJoin = false) {
 }
 
 function nextTurn() {
-    if (match.health[0] <= 0 || match.health[1] <= 0) {
-        endRound();
-        return;
-    }
-
-    if (match.currentTurn >= TURNS_PER_ROUND) {
+    if (match.health[0] <= 0 || match.health[1] <= 0 || match.currentTurn >= TURNS_PER_ROUND) {
         endRound();
         return;
     }
@@ -209,13 +191,16 @@ function processResults(g1, g2) {
         hasBonus: match.bonusPlayerIndex
     });
 
+    match.animsFinished = [false, false]; 
     if (turnTimer) clearTimeout(turnTimer);
     turnTimer = setTimeout(proceedAfterAnimation, ANIM_SAFETY_TIMEOUT);
 }
 
 function proceedAfterAnimation() {
-    if (turnTimer) clearTimeout(turnTimer);
-    match.animsFinished = [false, false];
+    if (turnTimer) {
+        clearTimeout(turnTimer);
+        turnTimer = null;
+    }
 
     if (match.health[0] <= 0 || match.health[1] <= 0) {
         endRound();
@@ -225,6 +210,7 @@ function proceedAfterAnimation() {
     if (match.bonusPlayerIndex !== -1) {
         match.status = "bonus_move";
         broadcast({ type: "bonus_start", playerIndex: match.bonusPlayerIndex });
+        match.animsFinished = [false, false]; // Reset for bonus animation
         turnTimer = setTimeout(handleAFK, TURN_TIME_LIMIT);
         return;
     }
@@ -271,23 +257,9 @@ wss.on("connection", (ws) => {
                 players.push({ ws, playerId: newId, equipments: clientEquips });
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
                 if (players.length === 2) {
-                    match.playerIds = players.map(p => p.playerId);
-                    match.roundReady = [false, false]; // Reset ready for lobby
-                    
-                    // Inform player 1 and tell both to show Ready button
-                    sendToGM(players[0].ws, { type: "player_joined" });
-                    broadcast({ type: "can_start_now" }); 
+                    broadcast({ type: "player_joined" });
+                    startMatch(true); 
                 }
-            }
-        }
-
-        // New lobby ready logic
-        if (msg.type === "player_ready") {
-            const pIdx = match.playerIds.indexOf(ws.playerId);
-            if (pIdx !== -1) {
-                match.roundReady[pIdx] = true;
-                broadcast({ type: "opponent_ready", playerIndex: pIdx });
-                checkLobbyReady();
             }
         }
 
@@ -324,9 +296,11 @@ wss.on("connection", (ws) => {
                     health: match.health 
                 });
 
-                match.bonusPlayerIndex = -1; 
+                match.bonusPlayerIndex = -1; // End bonus state immediately
+                match.animsFinished = [false, false]; // Reset to wait for bonus anim_done
+                
                 if (turnTimer) clearTimeout(turnTimer);
-                setTimeout(proceedAfterAnimation, 4000); 
+                turnTimer = setTimeout(proceedAfterAnimation, 5000); 
             }
         }
 
