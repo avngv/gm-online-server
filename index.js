@@ -87,7 +87,7 @@ function startMatch(isFirstJoin = false) {
     match.roundReady = [false, false]; 
     match.animsFinished = [true, true]; 
 
-    // game_prepare is now sent during join/lobby, so we just trigger nextTurn here
+    // Note: game_prepare was already sent during the Ready Phase, so we go straight to turns
     setTimeout(nextTurn, 500);
 }
 
@@ -232,6 +232,7 @@ wss.on("connection", (ws) => {
         if (msg.type === "join") {
             const existingId = msg.playerId;
             const clientEquips = msg.equipments || [];
+            
             if (existingId && (disconnectedPlayers[existingId] || match.playerIds.includes(existingId))) {
                 clearTimeout(disconnectedPlayers[existingId]);
                 delete disconnectedPlayers[existingId];
@@ -240,20 +241,22 @@ wss.on("connection", (ws) => {
                 sendToGM(ws, { type: "reconnect", matchState: match });
                 return;
             }
+
             if (players.length < 2) {
                 const newId = randomUUID();
                 ws.playerId = newId;
                 players.push({ ws, playerId: newId, equipments: clientEquips });
                 sendToGM(ws, { type: "assign_id", playerId: newId, equipments: clientEquips });
+                
                 if (players.length === 2) {
                     match.playerIds = players.map(p => p.playerId);
                     match.playerLoadouts = players.map(p => p.equipments);
                     match.roundReady = [false, false];
                     
-                    // 1. Tell both to create the opponent instance
+                    // 1. BROADCAST JOINED FIRST (CREATES OPPONENT INSTANCES)
                     broadcast({ type: "player_joined" });
 
-                    // 2. SEND GAME_PREPARE DATA BEFORE READY PHASE
+                    // 2. BROADCAST GAME PREPARE (SETS INDICES AND HP)
                     players.forEach((p, index) => {
                         const opponentIndex = index === 0 ? 1 : 0;
                         const opponent = players[opponentIndex];
@@ -266,10 +269,92 @@ wss.on("connection", (ws) => {
                         });
                     });
 
-                    // 3. Trigger Ready UI
+                    // 3. BROADCAST CAN START (SHOWS READY UI)
                     broadcast({ type: "can_start_now" }); 
                 }
             }
         }
 
-        if (msg.type === "player
+        if (msg.type === "player_ready") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1 && !match.roundReady[pIdx]) {
+                match.roundReady[pIdx] = true;
+                
+                if (match.roundReady[0] && match.roundReady[1]) {
+                    broadcast({ type: "match_starting" });
+                    setTimeout(() => {
+                        startMatch(true); 
+                    }, 2000);
+                }
+            }
+        }
+
+        if (msg.type === "guess") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx === -1) return;
+
+            if (match.status === "playing") {
+                if (match.guesses[pIdx][match.currentTurn - 1] !== undefined) return;
+                match.guesses[pIdx][match.currentTurn - 1] = { value: msg.value, slot: msg.slot_index };
+                checkTurnCompletion();
+            } 
+            else if (match.status === "bonus_move" && pIdx === match.bonusPlayerIndex) {
+                const resultDice = match.diceRolls[match.currentTurn - 1];
+                const itemName = match.playerLoadouts[pIdx][msg.slot_index];
+                const item = ITEMS[itemName];
+                let dmg = 0;
+                let success = (msg.value <= resultDice);
+
+                if (success && item.type === "damage") {
+                    dmg = item.value + msg.value;
+                    const targetIdx = pIdx === 0 ? 1 : 0;
+                    match.health[targetIdx] = Math.max(0, match.health[targetIdx] - dmg);
+                }
+
+                broadcast({ 
+                    type: "bonus_result", 
+                    attackerIndex: pIdx, 
+                    itemName: itemName,
+                    slot_index: msg.slot_index,
+                    guess: msg.value,
+                    success: success,
+                    dmg: dmg, 
+                    health: match.health 
+                });
+
+                match.bonusPlayerIndex = -1; 
+                match.animsFinished = [false, false]; 
+                
+                if (turnTimer) clearTimeout(turnTimer);
+                turnTimer = setTimeout(proceedAfterAnimation, 5000); 
+            }
+        }
+
+        if (msg.type === "anim_done") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1) {
+                match.animsFinished[pIdx] = true;
+                if (match.animsFinished[0] && match.animsFinished[1]) {
+                    proceedAfterAnimation();
+                }
+            }
+        }
+
+        if (msg.type === "round_ready" && match.status === "round_wait") {
+            const pIdx = match.playerIds.indexOf(ws.playerId);
+            if (pIdx !== -1 && !match.roundReady[pIdx]) {
+                match.roundReady[pIdx] = true;
+                broadcast({ type: "opponent_ready", playerIndex: pIdx });
+                if (match.roundReady[0] && match.roundReady[1]) startMatch(); 
+            }
+        }
+    });
+
+    ws.on("close", () => {
+        const playerId = ws.playerId;
+        players = players.filter(p => p.playerId !== playerId);
+        disconnectedPlayers[playerId] = setTimeout(() => delete disconnectedPlayers[playerId], RECONNECT_TIMEOUT);
+    });
+});
+
+server.listen(PORT, "0.0.0.0", () => console.log(`Server Online`));
